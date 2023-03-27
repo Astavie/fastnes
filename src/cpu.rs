@@ -1,15 +1,17 @@
 use std::{fmt::Debug, rc::Rc};
 
+use repeated::repeated;
+
 pub trait PPU {
     fn write(&mut self, addr: u16, data: u8);
     fn read(&mut self, addr: u16) -> u8;
 }
 
-type Instruction<P> = fn(&mut MOS6502<P>);
+type Instruction<P> = fn(&mut CPU<P>);
 type Instructions<P> = Rc<[Instruction<P>; 256]>;
 
 #[allow(non_snake_case)]
-pub struct MOS6502<P: PPU> {
+pub struct CPU<P: PPU> {
     // instruction list
     instructions: Instructions<P>,
 
@@ -49,7 +51,7 @@ impl PPU for DummyPPU {
 }
 
 pub(crate) fn nestest(rom: [u8; 16384], instr: Instructions<DummyPPU>) {
-    let mut cpu = MOS6502::new(rom, instr, DummyPPU());
+    let mut cpu = CPU::new(rom, instr, DummyPPU());
     cpu.reset();
 
     let max_cycles = 26548;
@@ -62,17 +64,17 @@ pub(crate) fn nestest(rom: [u8; 16384], instr: Instructions<DummyPPU>) {
 }
 
 trait Addressable {
-    fn poke<P: PPU>(&self, cpu: &mut MOS6502<P>);
-    fn read<P: PPU>(&self, cpu: &mut MOS6502<P>) -> u8;
-    fn write<P: PPU>(&self, cpu: &mut MOS6502<P>, data: u8);
+    fn poke<P: PPU>(&self, cpu: &mut CPU<P>);
+    fn read<P: PPU>(&self, cpu: &mut CPU<P>) -> u8;
+    fn write<P: PPU>(&self, cpu: &mut CPU<P>, data: u8);
 
-    fn read_flags<P: PPU>(&self, cpu: &mut MOS6502<P>) -> u8 {
+    fn read_flags<P: PPU>(&self, cpu: &mut CPU<P>) -> u8 {
         let data = self.read(cpu);
         cpu.flags(data);
         data
     }
 
-    fn compare<P: PPU>(&self, cpu: &mut MOS6502<P>, reg: u8) {
+    fn compare<P: PPU>(&self, cpu: &mut CPU<P>, reg: u8) {
         let data = self.read(cpu);
         cpu.compare(data, reg);
     }
@@ -82,33 +84,33 @@ struct Accumulator();
 struct Implied();
 
 impl Addressable for Accumulator {
-    fn poke<P: PPU>(&self, _cpu: &mut MOS6502<P>) {}
-    fn read<P: PPU>(&self, cpu: &mut MOS6502<P>) -> u8 {
+    fn poke<P: PPU>(&self, _cpu: &mut CPU<P>) {}
+    fn read<P: PPU>(&self, cpu: &mut CPU<P>) -> u8 {
         cpu.A
     }
-    fn write<P: PPU>(&self, cpu: &mut MOS6502<P>, data: u8) {
+    fn write<P: PPU>(&self, cpu: &mut CPU<P>, data: u8) {
         cpu.A = data;
     }
 }
 
 impl Addressable for Implied {
-    fn poke<P: PPU>(&self, _cpu: &mut MOS6502<P>) {}
-    fn read<P: PPU>(&self, _cpu: &mut MOS6502<P>) -> u8 {
+    fn poke<P: PPU>(&self, _cpu: &mut CPU<P>) {}
+    fn read<P: PPU>(&self, _cpu: &mut CPU<P>) -> u8 {
         unreachable!();
     }
-    fn write<P: PPU>(&self, _cpu: &mut MOS6502<P>, _data: u8) {
+    fn write<P: PPU>(&self, _cpu: &mut CPU<P>, _data: u8) {
         unreachable!();
     }
 }
 
 impl Addressable for u16 {
-    fn poke<P: PPU>(&self, cpu: &mut MOS6502<P>) {
+    fn poke<P: PPU>(&self, cpu: &mut CPU<P>) {
         cpu.read_addr(*self);
     }
-    fn read<P: PPU>(&self, cpu: &mut MOS6502<P>) -> u8 {
+    fn read<P: PPU>(&self, cpu: &mut CPU<P>) -> u8 {
         cpu.read_addr(*self)
     }
-    fn write<P: PPU>(&self, cpu: &mut MOS6502<P>, data: u8) {
+    fn write<P: PPU>(&self, cpu: &mut CPU<P>, data: u8) {
         cpu.write_addr(*self, data)
     }
 }
@@ -193,7 +195,7 @@ impl Micro {
             }
         }
     }
-    const fn instruction<P: PPU, A: Addressable, const S: Micro>() -> fn(&mut MOS6502<P>, A) {
+    const fn instruction<P: PPU, A: Addressable, const S: Micro>() -> fn(&mut CPU<P>, A) {
         match S {
             Micro::ASL => |cpu, addr| {
                 let data = addr.read(cpu);
@@ -488,7 +490,7 @@ impl Micro {
     }
 }
 
-impl<P: PPU> MOS6502<P> {
+impl<P: PPU> CPU<P> {
     // fn poll(&mut self) {
     //     // sample irq and nmi (nmi stays on while irq gets reset every cycle)
     //     self.irq_sample = self.irq > 0;
@@ -512,7 +514,7 @@ impl<P: PPU> MOS6502<P> {
         self.SP = 0;
     }
     pub fn new(rom: [u8; 16384], instructions: Instructions<P>, ppu: P) -> Self {
-        MOS6502 {
+        CPU {
             instructions,
             PC: 0,
             SP: 0,
@@ -1122,268 +1124,11 @@ const fn branch<const MASK: u8, const ZERO: bool, P: PPU>() -> Instruction<P> {
 }
 
 pub fn instructions<P: PPU>() -> Instructions<P> {
-    Rc::new(
-        (0..=255)
-            .map(|i: u8| match i {
-                0x00 => instruction::<P, 0x00>(),
-                0x01 => instruction::<P, 0x01>(),
-                0x02 => instruction::<P, 0x02>(),
-                0x03 => instruction::<P, 0x03>(),
-                0x04 => instruction::<P, 0x04>(),
-                0x05 => instruction::<P, 0x05>(),
-                0x06 => instruction::<P, 0x06>(),
-                0x07 => instruction::<P, 0x07>(),
-                0x08 => instruction::<P, 0x08>(),
-                0x09 => instruction::<P, 0x09>(),
-                0x0a => instruction::<P, 0x0a>(),
-                0x0b => instruction::<P, 0x0b>(),
-                0x0c => instruction::<P, 0x0c>(),
-                0x0d => instruction::<P, 0x0d>(),
-                0x0e => instruction::<P, 0x0e>(),
-                0x0f => instruction::<P, 0x0f>(),
-                0x10 => instruction::<P, 0x10>(),
-                0x11 => instruction::<P, 0x11>(),
-                0x12 => instruction::<P, 0x12>(),
-                0x13 => instruction::<P, 0x13>(),
-                0x14 => instruction::<P, 0x14>(),
-                0x15 => instruction::<P, 0x15>(),
-                0x16 => instruction::<P, 0x16>(),
-                0x17 => instruction::<P, 0x17>(),
-                0x18 => instruction::<P, 0x18>(),
-                0x19 => instruction::<P, 0x19>(),
-                0x1a => instruction::<P, 0x1a>(),
-                0x1b => instruction::<P, 0x1b>(),
-                0x1c => instruction::<P, 0x1c>(),
-                0x1d => instruction::<P, 0x1d>(),
-                0x1e => instruction::<P, 0x1e>(),
-                0x1f => instruction::<P, 0x1f>(),
-                0x20 => instruction::<P, 0x20>(),
-                0x21 => instruction::<P, 0x21>(),
-                0x22 => instruction::<P, 0x22>(),
-                0x23 => instruction::<P, 0x23>(),
-                0x24 => instruction::<P, 0x24>(),
-                0x25 => instruction::<P, 0x25>(),
-                0x26 => instruction::<P, 0x26>(),
-                0x27 => instruction::<P, 0x27>(),
-                0x28 => instruction::<P, 0x28>(),
-                0x29 => instruction::<P, 0x29>(),
-                0x2a => instruction::<P, 0x2a>(),
-                0x2b => instruction::<P, 0x2b>(),
-                0x2c => instruction::<P, 0x2c>(),
-                0x2d => instruction::<P, 0x2d>(),
-                0x2e => instruction::<P, 0x2e>(),
-                0x2f => instruction::<P, 0x2f>(),
-                0x30 => instruction::<P, 0x30>(),
-                0x31 => instruction::<P, 0x31>(),
-                0x32 => instruction::<P, 0x32>(),
-                0x33 => instruction::<P, 0x33>(),
-                0x34 => instruction::<P, 0x34>(),
-                0x35 => instruction::<P, 0x35>(),
-                0x36 => instruction::<P, 0x36>(),
-                0x37 => instruction::<P, 0x37>(),
-                0x38 => instruction::<P, 0x38>(),
-                0x39 => instruction::<P, 0x39>(),
-                0x3a => instruction::<P, 0x3a>(),
-                0x3b => instruction::<P, 0x3b>(),
-                0x3c => instruction::<P, 0x3c>(),
-                0x3d => instruction::<P, 0x3d>(),
-                0x3e => instruction::<P, 0x3e>(),
-                0x3f => instruction::<P, 0x3f>(),
-                0x40 => instruction::<P, 0x40>(),
-                0x41 => instruction::<P, 0x41>(),
-                0x42 => instruction::<P, 0x42>(),
-                0x43 => instruction::<P, 0x43>(),
-                0x44 => instruction::<P, 0x44>(),
-                0x45 => instruction::<P, 0x45>(),
-                0x46 => instruction::<P, 0x46>(),
-                0x47 => instruction::<P, 0x47>(),
-                0x48 => instruction::<P, 0x48>(),
-                0x49 => instruction::<P, 0x49>(),
-                0x4a => instruction::<P, 0x4a>(),
-                0x4b => instruction::<P, 0x4b>(),
-                0x4c => instruction::<P, 0x4c>(),
-                0x4d => instruction::<P, 0x4d>(),
-                0x4e => instruction::<P, 0x4e>(),
-                0x4f => instruction::<P, 0x4f>(),
-                0x50 => instruction::<P, 0x50>(),
-                0x51 => instruction::<P, 0x51>(),
-                0x52 => instruction::<P, 0x52>(),
-                0x53 => instruction::<P, 0x53>(),
-                0x54 => instruction::<P, 0x54>(),
-                0x55 => instruction::<P, 0x55>(),
-                0x56 => instruction::<P, 0x56>(),
-                0x57 => instruction::<P, 0x57>(),
-                0x58 => instruction::<P, 0x58>(),
-                0x59 => instruction::<P, 0x59>(),
-                0x5a => instruction::<P, 0x5a>(),
-                0x5b => instruction::<P, 0x5b>(),
-                0x5c => instruction::<P, 0x5c>(),
-                0x5d => instruction::<P, 0x5d>(),
-                0x5e => instruction::<P, 0x5e>(),
-                0x5f => instruction::<P, 0x5f>(),
-                0x60 => instruction::<P, 0x60>(),
-                0x61 => instruction::<P, 0x61>(),
-                0x62 => instruction::<P, 0x62>(),
-                0x63 => instruction::<P, 0x63>(),
-                0x64 => instruction::<P, 0x64>(),
-                0x65 => instruction::<P, 0x65>(),
-                0x66 => instruction::<P, 0x66>(),
-                0x67 => instruction::<P, 0x67>(),
-                0x68 => instruction::<P, 0x68>(),
-                0x69 => instruction::<P, 0x69>(),
-                0x6a => instruction::<P, 0x6a>(),
-                0x6b => instruction::<P, 0x6b>(),
-                0x6c => instruction::<P, 0x6c>(),
-                0x6d => instruction::<P, 0x6d>(),
-                0x6e => instruction::<P, 0x6e>(),
-                0x6f => instruction::<P, 0x6f>(),
-                0x70 => instruction::<P, 0x70>(),
-                0x71 => instruction::<P, 0x71>(),
-                0x72 => instruction::<P, 0x72>(),
-                0x73 => instruction::<P, 0x73>(),
-                0x74 => instruction::<P, 0x74>(),
-                0x75 => instruction::<P, 0x75>(),
-                0x76 => instruction::<P, 0x76>(),
-                0x77 => instruction::<P, 0x77>(),
-                0x78 => instruction::<P, 0x78>(),
-                0x79 => instruction::<P, 0x79>(),
-                0x7a => instruction::<P, 0x7a>(),
-                0x7b => instruction::<P, 0x7b>(),
-                0x7c => instruction::<P, 0x7c>(),
-                0x7d => instruction::<P, 0x7d>(),
-                0x7e => instruction::<P, 0x7e>(),
-                0x7f => instruction::<P, 0x7f>(),
-                0x80 => instruction::<P, 0x80>(),
-                0x81 => instruction::<P, 0x81>(),
-                0x82 => instruction::<P, 0x82>(),
-                0x83 => instruction::<P, 0x83>(),
-                0x84 => instruction::<P, 0x84>(),
-                0x85 => instruction::<P, 0x85>(),
-                0x86 => instruction::<P, 0x86>(),
-                0x87 => instruction::<P, 0x87>(),
-                0x88 => instruction::<P, 0x88>(),
-                0x89 => instruction::<P, 0x89>(),
-                0x8a => instruction::<P, 0x8a>(),
-                0x8b => instruction::<P, 0x8b>(),
-                0x8c => instruction::<P, 0x8c>(),
-                0x8d => instruction::<P, 0x8d>(),
-                0x8e => instruction::<P, 0x8e>(),
-                0x8f => instruction::<P, 0x8f>(),
-                0x90 => instruction::<P, 0x90>(),
-                0x91 => instruction::<P, 0x91>(),
-                0x92 => instruction::<P, 0x92>(),
-                0x93 => instruction::<P, 0x93>(),
-                0x94 => instruction::<P, 0x94>(),
-                0x95 => instruction::<P, 0x95>(),
-                0x96 => instruction::<P, 0x96>(),
-                0x97 => instruction::<P, 0x97>(),
-                0x98 => instruction::<P, 0x98>(),
-                0x99 => instruction::<P, 0x99>(),
-                0x9a => instruction::<P, 0x9a>(),
-                0x9b => instruction::<P, 0x9b>(),
-                0x9c => instruction::<P, 0x9c>(),
-                0x9d => instruction::<P, 0x9d>(),
-                0x9e => instruction::<P, 0x9e>(),
-                0x9f => instruction::<P, 0x9f>(),
-                0xa0 => instruction::<P, 0xa0>(),
-                0xa1 => instruction::<P, 0xa1>(),
-                0xa2 => instruction::<P, 0xa2>(),
-                0xa3 => instruction::<P, 0xa3>(),
-                0xa4 => instruction::<P, 0xa4>(),
-                0xa5 => instruction::<P, 0xa5>(),
-                0xa6 => instruction::<P, 0xa6>(),
-                0xa7 => instruction::<P, 0xa7>(),
-                0xa8 => instruction::<P, 0xa8>(),
-                0xa9 => instruction::<P, 0xa9>(),
-                0xaa => instruction::<P, 0xaa>(),
-                0xab => instruction::<P, 0xab>(),
-                0xac => instruction::<P, 0xac>(),
-                0xad => instruction::<P, 0xad>(),
-                0xae => instruction::<P, 0xae>(),
-                0xaf => instruction::<P, 0xaf>(),
-                0xb0 => instruction::<P, 0xb0>(),
-                0xb1 => instruction::<P, 0xb1>(),
-                0xb2 => instruction::<P, 0xb2>(),
-                0xb3 => instruction::<P, 0xb3>(),
-                0xb4 => instruction::<P, 0xb4>(),
-                0xb5 => instruction::<P, 0xb5>(),
-                0xb6 => instruction::<P, 0xb6>(),
-                0xb7 => instruction::<P, 0xb7>(),
-                0xb8 => instruction::<P, 0xb8>(),
-                0xb9 => instruction::<P, 0xb9>(),
-                0xba => instruction::<P, 0xba>(),
-                0xbb => instruction::<P, 0xbb>(),
-                0xbc => instruction::<P, 0xbc>(),
-                0xbd => instruction::<P, 0xbd>(),
-                0xbe => instruction::<P, 0xbe>(),
-                0xbf => instruction::<P, 0xbf>(),
-                0xc0 => instruction::<P, 0xc0>(),
-                0xc1 => instruction::<P, 0xc1>(),
-                0xc2 => instruction::<P, 0xc2>(),
-                0xc3 => instruction::<P, 0xc3>(),
-                0xc4 => instruction::<P, 0xc4>(),
-                0xc5 => instruction::<P, 0xc5>(),
-                0xc6 => instruction::<P, 0xc6>(),
-                0xc7 => instruction::<P, 0xc7>(),
-                0xc8 => instruction::<P, 0xc8>(),
-                0xc9 => instruction::<P, 0xc9>(),
-                0xca => instruction::<P, 0xca>(),
-                0xcb => instruction::<P, 0xcb>(),
-                0xcc => instruction::<P, 0xcc>(),
-                0xcd => instruction::<P, 0xcd>(),
-                0xce => instruction::<P, 0xce>(),
-                0xcf => instruction::<P, 0xcf>(),
-                0xd0 => instruction::<P, 0xd0>(),
-                0xd1 => instruction::<P, 0xd1>(),
-                0xd2 => instruction::<P, 0xd2>(),
-                0xd3 => instruction::<P, 0xd3>(),
-                0xd4 => instruction::<P, 0xd4>(),
-                0xd5 => instruction::<P, 0xd5>(),
-                0xd6 => instruction::<P, 0xd6>(),
-                0xd7 => instruction::<P, 0xd7>(),
-                0xd8 => instruction::<P, 0xd8>(),
-                0xd9 => instruction::<P, 0xd9>(),
-                0xda => instruction::<P, 0xda>(),
-                0xdb => instruction::<P, 0xdb>(),
-                0xdc => instruction::<P, 0xdc>(),
-                0xdd => instruction::<P, 0xdd>(),
-                0xde => instruction::<P, 0xde>(),
-                0xdf => instruction::<P, 0xdf>(),
-                0xe0 => instruction::<P, 0xe0>(),
-                0xe1 => instruction::<P, 0xe1>(),
-                0xe2 => instruction::<P, 0xe2>(),
-                0xe3 => instruction::<P, 0xe3>(),
-                0xe4 => instruction::<P, 0xe4>(),
-                0xe5 => instruction::<P, 0xe5>(),
-                0xe6 => instruction::<P, 0xe6>(),
-                0xe7 => instruction::<P, 0xe7>(),
-                0xe8 => instruction::<P, 0xe8>(),
-                0xe9 => instruction::<P, 0xe9>(),
-                0xea => instruction::<P, 0xea>(),
-                0xeb => instruction::<P, 0xeb>(),
-                0xec => instruction::<P, 0xec>(),
-                0xed => instruction::<P, 0xed>(),
-                0xee => instruction::<P, 0xee>(),
-                0xef => instruction::<P, 0xef>(),
-                0xf0 => instruction::<P, 0xf0>(),
-                0xf1 => instruction::<P, 0xf1>(),
-                0xf2 => instruction::<P, 0xf2>(),
-                0xf3 => instruction::<P, 0xf3>(),
-                0xf4 => instruction::<P, 0xf4>(),
-                0xf5 => instruction::<P, 0xf5>(),
-                0xf6 => instruction::<P, 0xf6>(),
-                0xf7 => instruction::<P, 0xf7>(),
-                0xf8 => instruction::<P, 0xf8>(),
-                0xf9 => instruction::<P, 0xf9>(),
-                0xfa => instruction::<P, 0xfa>(),
-                0xfb => instruction::<P, 0xfb>(),
-                0xfc => instruction::<P, 0xfc>(),
-                0xfd => instruction::<P, 0xfd>(),
-                0xfe => instruction::<P, 0xfe>(),
-                0xff => instruction::<P, 0xff>(),
-            })
-            .collect::<Vec<Instruction<P>>>()
-            .try_into()
-            .unwrap_or_else(|_| unreachable!()),
-    )
+    Rc::new(repeated!(
+        %%s prelude [ prelude s%%
+        for op in [0;255] {
+            instruction::<P, %%op%%>(),
+        }
+        %%e postlude ] postlude e%%
+    ))
 }
