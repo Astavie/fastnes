@@ -1,4 +1,4 @@
-use std::{fmt::Debug, fs::read_to_string, rc::Rc};
+use std::{fmt::Debug, rc::Rc};
 
 pub trait PPU {
     fn write(&mut self, addr: u16, data: u8);
@@ -6,7 +6,7 @@ pub trait PPU {
 }
 
 type Instruction<P> = fn(&mut MOS6502<P>);
-type Instructions<P> = Rc<[fn(&mut MOS6502<P>); 256]>;
+type Instructions<P> = Rc<[Instruction<P>; 256]>;
 
 #[allow(non_snake_case)]
 pub struct MOS6502<P: PPU> {
@@ -18,7 +18,7 @@ pub struct MOS6502<P: PPU> {
     rom: [u8; 16384],
 
     // ppu
-    cycle: usize,
+    pub(crate) cycle: usize,
     ppu: P,
 
     // registers
@@ -43,7 +43,8 @@ impl PPU for DummyPPU {
         // todo!()
     }
     fn read(&mut self, _addr: u16) -> u8 {
-        todo!()
+        // todo!()
+        0
     }
 }
 
@@ -324,7 +325,7 @@ impl Micro {
             Micro::CPX => |cpu, addr| addr.compare(cpu, cpu.X),
             Micro::CPY => |cpu, addr| addr.compare(cpu, cpu.Y),
             Micro::CMP => |cpu, addr| addr.compare(cpu, cpu.A),
-            Micro::NOP => |cpu, addr| _ = addr.poke(cpu),
+            Micro::NOP => |cpu, addr| addr.poke(cpu),
 
             Micro::SEC => |cpu, _addr| cpu.P |= 0b00000001,
             Micro::SEI => |cpu, _addr| cpu.P |= 0b00000100,
@@ -508,6 +509,7 @@ impl<P: PPU> MOS6502<P> {
         self.res_sample = true;
         self.hardware_interrupt = true;
         self.cycle = 0;
+        self.SP = 0;
     }
     pub fn new(rom: [u8; 16384], instructions: Instructions<P>, ppu: P) -> Self {
         MOS6502 {
@@ -1088,7 +1090,7 @@ impl Mode {
                 // cpu.poll();
             },
             Mode::Jam => |_cpu| {
-                panic!();
+                panic!("jam instruction");
             },
         }
     }
@@ -1382,6 +1384,6 @@ pub fn instructions<P: PPU>() -> Instructions<P> {
             })
             .collect::<Vec<Instruction<P>>>()
             .try_into()
-            .unwrap_or_else(|_| panic!()),
+            .unwrap_or_else(|_| unreachable!()),
     )
 }
