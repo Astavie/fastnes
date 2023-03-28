@@ -3,8 +3,11 @@ use std::{fmt::Debug, rc::Rc};
 use repeated::repeated;
 
 pub trait PPU {
-    fn write(&mut self, addr: u16, data: u8);
-    fn read(&mut self, addr: u16) -> u8;
+    fn write(&mut self, cycle: usize, addr: u16, data: u8);
+    fn read(&mut self, cycle: usize, addr: u16) -> u8;
+
+    fn nmi(&mut self, cycle: usize) -> bool;
+    fn new() -> Self;
 }
 
 type Instruction<P> = fn(&mut CPU<P>);
@@ -16,15 +19,16 @@ pub struct CPU<P: PPU> {
     instructions: Instructions<P>,
 
     // rom
-    ram: [u8; 2048],
-    rom: [u8; 16384],
+    ram_internal: [u8; 0x0800],
+    pub(crate) ram_work: [u8; 0x2000],
+    rom: [u8; 0x8000],
 
     // ppu
-    pub(crate) cycle: usize,
+    pub(crate) ppu_cycle: usize,
     ppu: P,
 
     // registers
-    PC: u16,
+    pub(crate) PC: u16,
     SP: u8,
     P: u8,
     A: u8,
@@ -38,29 +42,147 @@ pub struct CPU<P: PPU> {
     hardware_interrupt: bool,
 }
 
-pub(crate) struct DummyPPU();
+pub(crate) struct DummyPPU;
+
+pub(crate) struct FastPPU {
+    next_vblank: usize,
+    last_nmi: usize,
+    open: u8,
+    odd_frame: bool,
+
+    nmi_output: bool,
+    background: bool,
+}
+
+const SCANLINE: usize = 341;
+const LINES: usize = 262;
+const MARGIN: usize = 30;
 
 impl PPU for DummyPPU {
-    fn write(&mut self, _addr: u16, _data: u8) {
-        // todo!()
-    }
-    fn read(&mut self, _addr: u16) -> u8 {
-        // todo!()
+    fn write(&mut self, _cycle: usize, _addr: u16, _data: u8) {}
+    fn read(&mut self, _cycle: usize, _addr: u16) -> u8 {
         0
+    }
+    fn nmi(&mut self, _cycle: usize) -> bool {
+        false
+    }
+    fn new() -> Self {
+        DummyPPU
     }
 }
 
-pub(crate) fn nestest(rom: [u8; 16384], instr: Instructions<DummyPPU>) {
-    let mut cpu = CPU::new(rom, instr, DummyPPU());
-    cpu.reset();
+impl FastPPU {
+    fn sync(&mut self, cycle: usize, offset: usize) {
+        while cycle >= self.next_vblank + offset {
+            self.odd_frame = !self.odd_frame;
+            self.next_vblank += LINES * SCANLINE - usize::from(self.background && self.odd_frame);
+        }
+    }
+}
 
-    let max_cycles = 26548;
-    while cpu.cycle < max_cycles {
-        cpu.instruction();
+impl PPU for FastPPU {
+    fn new() -> Self {
+        FastPPU {
+            next_vblank: 241 * SCANLINE + 2,
+            nmi_output: false,
+            odd_frame: false,
+            background: false,
+            last_nmi: 0,
+            open: 0,
+        }
+    }
+    fn write(&mut self, cycle: usize, addr: u16, data: u8) {
+        self.open = data;
+        if addr < 0x4000 {
+            match addr & 7 {
+                0 => {
+                    // TODO: the rest
+
+                    // NMI
+                    self.nmi_output = data & 0b10000000 != 0;
+                    if !self.nmi_output {
+                        // reset last_nmi on disable so another nmi can occur on enable
+                        self.last_nmi = 0;
+                    } else {
+                        // go to next vblank on enable
+                        self.sync(cycle, 20 * SCANLINE);
+                    }
+                }
+                1 => {
+                    // TODO: the rest
+                    self.sync(cycle, 20 * SCANLINE + MARGIN);
+
+                    // background
+                    let old = self.background;
+                    self.background = data & 0b1000 != 0;
+
+                    if !old && self.background {
+                        // enable background
+                        if self.odd_frame && cycle < self.next_vblank - 241 * SCANLINE - 3 {
+                            self.next_vblank -= 1;
+                        }
+                    }
+
+                    if old && !self.background {
+                        // disable background
+                        if self.odd_frame && cycle < self.next_vblank - 241 * SCANLINE - 2 {
+                            self.next_vblank += 1;
+                        }
+                    }
+                }
+                _ => {
+                    // TODO
+                }
+            }
+        } else {
+            // TODO
+        }
     }
 
-    assert_eq!(cpu.cycle, max_cycles);
-    assert_eq!(cpu.PC, 0xC6A2);
+    fn read(&mut self, cycle: usize, addr: u16) -> u8 {
+        if addr < 0x4000 {
+            match addr & 7 {
+                2 => {
+                    // TODO: sprite overflow and sprite 0 hit
+                    self.open &= 0b00011111;
+
+                    // vblank
+                    self.sync(cycle, 20 * SCANLINE + 1);
+
+                    if cycle > self.next_vblank {
+                        self.open |= 0b10000000;
+                    }
+
+                    if cycle >= self.next_vblank {
+                        // reset vblank
+                        self.odd_frame = !self.odd_frame;
+                        self.next_vblank +=
+                            LINES * SCANLINE - usize::from(self.background && self.odd_frame);
+                    }
+                }
+                _ => {
+                    // TODO
+                }
+            };
+        } else {
+            // TODO
+        }
+        self.open
+    }
+
+    fn nmi(&mut self, cycle: usize) -> bool {
+        if !self.nmi_output {
+            return false;
+        }
+
+        if self.last_nmi >= self.next_vblank || cycle < self.next_vblank {
+            false
+        } else {
+            self.sync(cycle, 20 * SCANLINE);
+            self.last_nmi = cycle;
+            true
+        }
+    }
 }
 
 trait Addressable {
@@ -491,41 +613,46 @@ impl Micro {
 }
 
 impl<P: PPU> CPU<P> {
-    // fn poll(&mut self) {
-    //     // sample irq and nmi (nmi stays on while irq gets reset every cycle)
-    //     self.irq_sample = self.irq > 0;
-    //     self.nmi_sample = self.nmi_sample || self.nmi;
-    //     self.nmi = false;
-    // }
+    fn poll(&mut self) {
+        // sample irq and nmi (nmi stays on while irq gets reset every cycle)
+        // self.irq_sample = self.irq > 0;
+        self.nmi_sample = self.nmi_sample || self.ppu.nmi(self.ppu_cycle);
+    }
     pub fn instruction(&mut self) {
         // get instruction to perform
-        let op = self.read_pc();
-        let instr = self.instructions[if self.hardware_interrupt {
+        // self.poll();
+
+        let op = if self.nmi_sample || self.irq_sample || self.res_sample {
+            self.hardware_interrupt = true;
+            self.read_pc();
             0
         } else {
-            usize::from(op)
-        }];
+            self.read_pc()
+        };
+
+        let instr = self.instructions[usize::from(op)];
         instr(self);
     }
     pub fn reset(&mut self) {
         self.res_sample = true;
-        self.hardware_interrupt = true;
-        self.cycle = 0;
+        self.ppu_cycle = 0;
         self.SP = 0;
+        self.ppu = P::new();
     }
-    pub fn new(rom: [u8; 16384], instructions: Instructions<P>, ppu: P) -> Self {
+    pub fn new(rom: [u8; 32768]) -> Self {
         CPU {
-            instructions,
+            instructions: instructions(),
             PC: 0,
             SP: 0,
             P: 0,
             A: 0,
             X: 0,
             Y: 0,
-            cycle: 0,
-            ram: [0; 2048],
+            ppu_cycle: 0,
+            ram_internal: [0; 0x0800],
+            ram_work: [0; 0x2000],
             rom,
-            ppu,
+            ppu: P::new(),
             irq_sample: false,
             nmi_sample: false,
             res_sample: false,
@@ -555,24 +682,28 @@ impl<P: PPU> CPU<P> {
     }
     fn write_addr(&mut self, addr: u16, data: u8) {
         if !self.res_sample {
-            self.cycle += 1;
-            if addr < 0x0800 {
-                self.ram[usize::from(addr)] = data;
+            self.ppu_cycle += 3;
+            if addr < 0x2000 {
+                self.ram_internal[usize::from(addr & 0x07FF)] = data;
             } else if addr < 0x6000 {
-                self.ppu.write(addr, data);
+                self.ppu.write(self.ppu_cycle, addr, data);
+            } else if addr < 0x8000 {
+                self.ram_work[usize::from(addr & 0x1FFF)] = data;
             }
         } else {
             self.read_addr(addr);
         }
     }
     fn read_addr(&mut self, addr: u16) -> u8 {
-        self.cycle += 1;
-        if addr < 0x0800 {
-            self.ram[usize::from(addr)]
-        } else if addr >= 0x6000 {
-            self.rom[usize::from(addr & 0x3FFF)]
+        self.ppu_cycle += 3;
+        if addr < 0x2000 {
+            self.ram_internal[usize::from(addr & 0x07FF)]
+        } else if addr < 0x6000 {
+            self.ppu.read(self.ppu_cycle, addr)
+        } else if addr < 0x8000 {
+            self.ram_work[usize::from(addr & 0x1FFF)]
         } else {
-            self.ppu.read(addr)
+            self.rom[usize::from(addr & 0x7FFF)]
         }
     }
     fn read_ptr_lo(&mut self, ptr: u8) -> u8 {
@@ -592,9 +723,9 @@ impl<P: PPU> CPU<P> {
         self.read_addr(self.PC)
     }
     fn push(&mut self, data: u8) {
-        self.cycle += 1;
+        self.ppu_cycle += 3;
         if !self.res_sample {
-            self.ram[usize::from(0x0100 | u16::from(self.SP))] = data;
+            self.ram_internal[usize::from(0x0100 | u16::from(self.SP))] = data;
         }
         self.SP = self.SP.wrapping_sub(1);
     }
@@ -610,8 +741,8 @@ impl<P: PPU> CPU<P> {
         data
     }
     fn peek(&mut self) -> u8 {
-        self.cycle += 1;
-        self.ram[usize::from(0x0100 | u16::from(self.SP))]
+        self.ppu_cycle += 3;
+        self.ram_internal[usize::from(0x0100 | u16::from(self.SP))]
     }
 }
 
@@ -744,7 +875,7 @@ where
             cpu.push_lo();
 
             // poll address
-            // cpu.poll();
+            cpu.poll();
             let addr = if cpu.nmi_sample {
                 cpu.nmi_sample = false;
                 0xFFFA
@@ -778,9 +909,10 @@ where
         0x08 => |cpu| {
             // PHP
             cpu.peek_pc();
-            cpu.push(cpu.P | 0b00110000);
 
-            // cpu.poll();
+            cpu.poll();
+
+            cpu.push(cpu.P | 0b00110000);
         },
         0x20 => |cpu| {
             // JSR
@@ -788,18 +920,20 @@ where
             cpu.peek();
             cpu.push_hi();
             cpu.push_lo();
+
+            cpu.poll();
+
             let hi = cpu.read_pc();
             cpu.PC = u16::from(lo) | u16::from(hi) << 8;
-
-            // cpu.poll();
         },
         0x28 => |cpu| {
             // PLP
             cpu.peek_pc();
             cpu.pop();
-            cpu.P = cpu.peek() & 0b11001111;
 
-            // cpu.poll();
+            cpu.poll();
+
+            cpu.P = cpu.peek() & 0b11001111;
         },
         0x40 => |cpu| {
             // RTI
@@ -807,18 +941,20 @@ where
             cpu.pop();
             cpu.P = cpu.pop() & 0b11001111;
             let lo = cpu.pop();
+
+            cpu.poll();
+
             let hi = cpu.peek();
             cpu.PC = u16::from(lo) | u16::from(hi) << 8;
-
-            // cpu.poll();
         },
         0x4C => |cpu| {
             // JMP abs
             let lo = cpu.read_pc();
+
+            cpu.poll();
+
             let hi = cpu.read_pc();
             cpu.PC = u16::from(lo) | u16::from(hi) << 8;
-
-            // cpu.poll();
         },
         0x60 => |cpu| {
             // RTS
@@ -827,25 +963,28 @@ where
             let lo = cpu.pop();
             let hi = cpu.peek();
             cpu.PC = u16::from(lo) | u16::from(hi) << 8;
-            cpu.read_pc();
 
-            // cpu.poll();
+            cpu.poll();
+
+            cpu.read_pc();
         },
         0x48 => |cpu| {
             // PHA
             cpu.peek_pc();
-            cpu.push(cpu.A);
 
-            // cpu.poll();
+            cpu.poll();
+
+            cpu.push(cpu.A);
         },
         0x68 => |cpu| {
             // PLA
             cpu.peek_pc();
             cpu.pop();
+
+            cpu.poll();
+
             cpu.A = cpu.peek();
             cpu.flags(cpu.A);
-
-            // cpu.poll();
         },
         0x6C => |cpu| {
             // JMP ind
@@ -855,10 +994,11 @@ where
             let addr_hi = u16::from(lo.wrapping_add(1)) | u16::from(hi) << 8;
 
             let lo = cpu.read_addr(addr_lo);
+
+            cpu.poll();
+
             let hi = cpu.read_addr(addr_hi);
             cpu.PC = u16::from(lo) | u16::from(hi) << 8;
-
-            // cpu.poll();
         },
 
         0x18 => Mode::instruction::<P, { Mode::Implied }, { Micro::CLC }>(),
@@ -930,31 +1070,38 @@ impl Mode {
     const fn instruction<P: PPU, const S: Mode, const M: Micro>() -> Instruction<P> {
         match S {
             Mode::Accumulator => |cpu| {
+                cpu.poll();
+
                 cpu.peek_pc();
                 Micro::instruction::<P, Accumulator, M>()(cpu, Accumulator());
-                // cpu.poll();
             },
             Mode::Implied => |cpu| {
+                cpu.poll();
+
                 cpu.peek_pc();
                 Micro::instruction::<P, Implied, M>()(cpu, Implied());
-                // cpu.poll();
             },
             Mode::Immediate => |cpu| {
+                cpu.poll();
+
                 Micro::instruction::<P, u16, M>()(cpu, cpu.PC);
                 cpu.PC = cpu.PC.wrapping_add(1);
-                // cpu.poll();
             },
             Mode::Absolute => |cpu| {
                 let lo = cpu.read_pc();
                 let hi = cpu.read_pc();
                 let addr = u16::from(lo) | u16::from(hi) << 8;
+
+                cpu.poll();
+
                 Micro::instruction::<P, u16, M>()(cpu, addr);
-                // cpu.poll();
             },
             Mode::ZeroPage => |cpu| {
                 let addr = u16::from(cpu.read_pc());
+
+                cpu.poll();
+
                 Micro::instruction::<P, u16, M>()(cpu, addr);
-                // cpu.poll();
             },
             Mode::ZeroPageIndexed(i) => match i {
                 Index::X => |cpu| {
@@ -962,16 +1109,20 @@ impl Mode {
                     cpu.read_addr(u16::from(ptr));
 
                     let addr = u16::from(ptr.wrapping_add(cpu.X));
+
+                    cpu.poll();
+
                     Micro::instruction::<P, u16, M>()(cpu, addr);
-                    // cpu.poll();
                 },
                 Index::Y => |cpu| {
                     let ptr = cpu.read_pc();
                     cpu.read_addr(u16::from(ptr));
 
                     let addr = u16::from(ptr.wrapping_add(cpu.Y));
+
+                    cpu.poll();
+
                     Micro::instruction::<P, u16, M>()(cpu, addr);
-                    // cpu.poll();
                 },
             },
             Mode::AbsoluteIndexed(i) => match i {
@@ -984,6 +1135,9 @@ impl Mode {
 
                     if (addr as u8) < reg {
                         cpu.read_addr(addr);
+
+                        cpu.poll();
+
                         Micro::instruction::<P, u16, M>()(cpu, addr.wrapping_add(0x0100));
                     } else {
                         match M {
@@ -1005,10 +1159,11 @@ impl Mode {
                                 cpu.read_addr(addr);
                             }
                         }
+
+                        cpu.poll();
+
                         Micro::instruction::<P, u16, M>()(cpu, addr);
                     }
-
-                    // cpu.poll();
                 },
                 Index::Y => |cpu| {
                     let reg = cpu.Y;
@@ -1019,6 +1174,9 @@ impl Mode {
 
                     if (addr as u8) < reg {
                         cpu.read_addr(addr);
+
+                        cpu.poll();
+
                         Micro::instruction::<P, u16, M>()(cpu, addr.wrapping_add(0x0100));
                     } else {
                         match M {
@@ -1040,10 +1198,11 @@ impl Mode {
                                 cpu.read_addr(addr);
                             }
                         }
+
+                        cpu.poll();
+
                         Micro::instruction::<P, u16, M>()(cpu, addr);
                     }
-
-                    // cpu.poll();
                 },
             },
             Mode::IndexedIndirect => |cpu| {
@@ -1054,8 +1213,10 @@ impl Mode {
                 let lo = cpu.read_ptr_lo(ptr);
                 let hi = cpu.read_ptr_hi(ptr);
                 let addr = u16::from(lo) | u16::from(hi) << 8;
+
+                cpu.poll();
+
                 Micro::instruction::<P, u16, M>()(cpu, addr);
-                // cpu.poll();
             },
             Mode::IndirectIndexed => |cpu| {
                 let ptr = cpu.read_pc();
@@ -1065,6 +1226,9 @@ impl Mode {
 
                 if (addr as u8) < cpu.Y {
                     cpu.read_addr(addr);
+
+                    cpu.poll();
+
                     Micro::instruction::<P, u16, M>()(cpu, addr.wrapping_add(0x0100));
                 } else {
                     match M {
@@ -1086,10 +1250,11 @@ impl Mode {
                             cpu.read_addr(addr);
                         }
                     }
+
+                    cpu.poll();
+
                     Micro::instruction::<P, u16, M>()(cpu, addr);
                 }
-
-                // cpu.poll();
             },
             Mode::Jam => |_cpu| {
                 panic!("jam instruction");
@@ -1100,25 +1265,25 @@ impl Mode {
 
 const fn branch<const MASK: u8, const ZERO: bool, P: PPU>() -> Instruction<P> {
     |cpu| {
-        let oper = cpu.read_pc();
-        let addr = cpu.PC.wrapping_add_signed(i16::from(oper as i8));
-
         if (cpu.P & MASK == 0) == ZERO {
+            let oper = cpu.read_pc();
+            let addr = cpu.PC.wrapping_add_signed(i16::from(oper as i8));
+
             cpu.peek_pc();
             cpu.PC = (cpu.PC & 0xFF00) | (addr & 0x00FF);
 
             if cpu.PC != addr {
                 // fix PC
+                cpu.poll();
                 cpu.peek_pc();
                 cpu.PC = addr;
-
-                // self.poll();
             } else {
                 // immediately execute next instruction
                 cpu.instruction();
             }
         } else {
-            // self.poll();
+            cpu.poll();
+            cpu.read_pc();
         }
     }
 }
