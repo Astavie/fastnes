@@ -8,10 +8,11 @@
 extern crate test;
 
 mod cpu;
+mod instruction;
+mod ppu;
 
 #[cfg(test)]
 mod tests {
-    use repeated::repeated;
     use test::Bencher;
 
     use super::*;
@@ -29,7 +30,7 @@ mod tests {
             rom[i] = bytes[i & 0x3FFF]
         }
 
-        let mut cpu = cpu::CPU::<cpu::DummyPPU>::new(rom);
+        let mut cpu = cpu::CPU::<ppu::DummyPPU>::new(rom);
 
         b.iter(|| {
             cpu.reset();
@@ -37,11 +38,11 @@ mod tests {
             const END_CYCLE: usize = 26548;
             const END_ADDR: u16 = 0xC6A2;
 
-            while cpu.ppu_cycle / 3 < END_CYCLE {
+            while cpu.cycle() < END_CYCLE {
                 cpu.instruction();
             }
 
-            assert_eq!(cpu.ppu_cycle / 3, END_CYCLE);
+            assert_eq!(cpu.cycle(), END_CYCLE);
             assert_eq!(cpu.PC, END_ADDR);
         });
     }
@@ -58,7 +59,7 @@ mod tests {
             rom[i] = bytes[i & 0x3FFF]
         }
 
-        let mut cpu = cpu::CPU::<cpu::FastPPU>::new(rom);
+        let mut cpu = cpu::CPU::<ppu::FastPPU>::new(rom);
 
         b.iter(|| {
             cpu.reset();
@@ -66,11 +67,11 @@ mod tests {
             const END_CYCLE: usize = 26548;
             const END_ADDR: u16 = 0xC6A2;
 
-            while cpu.ppu_cycle / 3 < END_CYCLE {
+            while cpu.cycle() < END_CYCLE {
                 cpu.instruction();
             }
 
-            assert_eq!(cpu.ppu_cycle / 3, END_CYCLE);
+            assert_eq!(cpu.cycle(), END_CYCLE);
             assert_eq!(cpu.PC, END_ADDR);
         });
     }
@@ -80,7 +81,7 @@ mod tests {
         let rom = &mut file[16..32784];
         let rom: [u8; 0x8000] = rom.try_into().unwrap();
 
-        let mut cpu = cpu::CPU::<cpu::FastPPU>::new(rom);
+        let mut cpu = cpu::CPU::<ppu::FastPPU>::new(rom);
 
         cpu.reset();
 
@@ -89,27 +90,27 @@ mod tests {
         loop {
             cpu.instruction();
 
-            if !started && cpu.ram_work[0] == 0x80 {
+            if !started && cpu.read(0x6000) == 0x80 {
                 started = true;
             }
 
-            if started && cpu.ram_work[0] != 0x80 {
+            if started && cpu.read(0x6000) != 0x80 {
                 break;
             }
 
-            if cpu.ppu_cycle > 30_000_000 {
+            if cpu.cycle() > 10_000_000 {
                 println!("forcefully halted");
                 break;
             }
         }
 
-        let mut read = 4;
-        while cpu.ram_work[read] != 0 && read < 0x2000 {
-            print!("{}", char::from(cpu.ram_work[read]));
+        let mut read = 0x6004;
+        while cpu.read(read) != 0 && read < 0x8000 {
+            print!("{}", char::from(cpu.read(read)));
             read += 1;
         }
 
-        assert_eq!(cpu.ram_work[0], 0);
+        assert_eq!(cpu.read(read), 0);
     }
 
     #[test]
@@ -161,31 +162,6 @@ mod tests {
     fn even_odd_timing() {
         test_file("test/ppu_vbl_nmi/10-even_odd_timing.nes");
     }
-
-    // repeated!(for op in [0;255] {
-
-    //     #[bench]
-    //     fn bench_instr_%%op%%(b: &mut Bencher) {
-    //         let mut file = read("test/nestest/nestest.nes").unwrap();
-    //         let bytes = &mut file[16..16400];
-    //         bytes[0xFFFC & 0x3FFF] = 0x00;
-    //         bytes[0xFFFD & 0x3FFF] = 0xC0;
-
-    //         let mut rom: [u8; 0x8000] = [0; 0x8000];
-    //         for i in 0..0x8000 {
-    //             rom[i] = bytes[i & 0x3FFF]
-    //         }
-
-    //         let mut cpu = cpu::CPU::<cpu::FastPPU>::new(rom);
-    //         cpu.reset();
-    //         cpu.instruction();
-
-    //         let instr = cpu.instructions[%%op%%];
-
-    //         b.iter(|| instr(&mut cpu));
-    //     }
-
-    // });
 }
 
 fn main() {}
