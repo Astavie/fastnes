@@ -8,5 +8,10 @@ edition = "2021"
 [dependencies]
 repeated = "0.1.2"
 
+[dependencies.sdl2]
+version = "0.35.2"
+default-features = false
+features = ["ttf"]
+
 [profile.release]
 debug = 1

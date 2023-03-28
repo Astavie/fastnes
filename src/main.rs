@@ -5,8 +5,18 @@
 #![feature(const_mut_refs)]
 #![feature(is_some_and)]
 
+use std::fs::read;
+use std::time::Duration;
+
+use sdl2::event::Event;
+use sdl2::keyboard::Keycode;
+use sdl2::pixels::Color;
+use sdl2::rect::Rect;
+use sdl2::render::TextureQuery;
+
 extern crate test;
 
+mod controller;
 mod cpu;
 mod instruction;
 mod ppu;
@@ -30,7 +40,7 @@ mod tests {
             rom[i] = bytes[i & 0x3FFF]
         }
 
-        let mut cpu = cpu::CPU::<ppu::DummyPPU>::new(rom);
+        let mut cpu = cpu::CPU::<ppu::DummyPPU>::new(rom, controller::Controllers::disconnected());
 
         b.iter(|| {
             cpu.reset();
@@ -59,7 +69,7 @@ mod tests {
             rom[i] = bytes[i & 0x3FFF]
         }
 
-        let mut cpu = cpu::CPU::<ppu::FastPPU>::new(rom);
+        let mut cpu = cpu::CPU::<ppu::FastPPU>::new(rom, controller::Controllers::disconnected());
 
         b.iter(|| {
             cpu.reset();
@@ -81,7 +91,7 @@ mod tests {
         let rom = &mut file[16..32784];
         let rom: [u8; 0x8000] = rom.try_into().unwrap();
 
-        let mut cpu = cpu::CPU::<ppu::FastPPU>::new(rom);
+        let mut cpu = cpu::CPU::<ppu::FastPPU>::new(rom, controller::Controllers::disconnected());
 
         cpu.reset();
 
@@ -164,4 +174,183 @@ mod tests {
     }
 }
 
-fn main() {}
+fn open_file<P: ppu::PPU>(path: &str, controllers: controller::Controllers) -> cpu::CPU<P> {
+    let mut file = read(path).unwrap();
+
+    let rom: [u8; 0x8000] = match file[4] {
+        1 => {
+            let bytes = &mut file[16..16400];
+            let mut rom: [u8; 0x8000] = [0; 0x8000];
+            for i in 0..0x8000 {
+                rom[i] = bytes[i & 0x3FFF]
+            }
+            rom
+        }
+        2 => {
+            let bytes = &mut file[16..32784];
+            bytes.try_into().unwrap()
+        }
+        _ => panic!(),
+    };
+
+    cpu::CPU::new(rom, controllers)
+}
+
+fn main() {
+    let sdl_context = sdl2::init().unwrap();
+    let video_subsystem = sdl_context.video().unwrap();
+
+    let window = video_subsystem
+        .window("fastnes", 256, 240)
+        .position_centered()
+        .build()
+        .unwrap();
+
+    let mut canvas = window.into_canvas().build().unwrap();
+
+    canvas.set_draw_color(Color::RGB(0, 255, 255));
+    canvas.clear();
+    canvas.present();
+
+    let (controllers, input) = controller::Controllers::standard();
+    let mut cpu = open_file::<ppu::FastPPU>("test/color_test.nes", controllers);
+    cpu.reset();
+
+    let mut cycle_target = 0;
+    let mut event_pump = sdl_context.event_pump().unwrap();
+
+    let ttf_context = sdl2::ttf::init().unwrap();
+    let font = ttf_context.load_font("test/pixeloid.ttf", 14).unwrap();
+
+    let texture_creator = canvas.texture_creator();
+
+    'running: loop {
+        canvas.clear();
+
+        cycle_target += 29780;
+        while cpu.cycle() < cycle_target {
+            cpu.instruction();
+        }
+
+        let op = cpu.read(cpu.PC);
+        let surface = font
+            .render(format!("PC: ${:04X} OP:{:02X}", cpu.PC, op).as_str())
+            .blended(Color::RGBA(255, 0, 0, 255))
+            .unwrap();
+        let texture = texture_creator
+            .create_texture_from_surface(&surface)
+            .unwrap();
+
+        let TextureQuery { width, height, .. } = texture.query();
+
+        canvas
+            .copy(&texture, None, Some(Rect::new(0, 0, width, height)))
+            .unwrap();
+
+        for event in event_pump.poll_iter() {
+            match event {
+                Event::Quit { .. } => break 'running,
+                Event::KeyDown {
+                    keycode: Some(Keycode::Z),
+                    ..
+                } => {
+                    input.set(input.get() | 0b00000001);
+                }
+                Event::KeyDown {
+                    keycode: Some(Keycode::X),
+                    ..
+                } => {
+                    input.set(input.get() | 0b00000010);
+                }
+                Event::KeyDown {
+                    keycode: Some(Keycode::RShift),
+                    ..
+                } => {
+                    input.set(input.get() | 0b00000100);
+                }
+                Event::KeyDown {
+                    keycode: Some(Keycode::Return),
+                    ..
+                } => {
+                    input.set(input.get() | 0b00001000);
+                }
+                Event::KeyDown {
+                    keycode: Some(Keycode::Up),
+                    ..
+                } => {
+                    input.set(input.get() | 0b00010000);
+                }
+                Event::KeyDown {
+                    keycode: Some(Keycode::Down),
+                    ..
+                } => {
+                    input.set(input.get() | 0b00100000);
+                }
+                Event::KeyDown {
+                    keycode: Some(Keycode::Left),
+                    ..
+                } => {
+                    input.set(input.get() | 0b01000000);
+                }
+                Event::KeyDown {
+                    keycode: Some(Keycode::Right),
+                    ..
+                } => {
+                    input.set(input.get() | 0b10000000);
+                }
+                Event::KeyUp {
+                    keycode: Some(Keycode::Z),
+                    ..
+                } => {
+                    input.set(input.get() & 0b11111110);
+                }
+                Event::KeyUp {
+                    keycode: Some(Keycode::X),
+                    ..
+                } => {
+                    input.set(input.get() & 0b11111101);
+                }
+                Event::KeyUp {
+                    keycode: Some(Keycode::RShift),
+                    ..
+                } => {
+                    input.set(input.get() & 0b11111011);
+                }
+                Event::KeyUp {
+                    keycode: Some(Keycode::Return),
+                    ..
+                } => {
+                    input.set(input.get() & 0b11110111);
+                }
+                Event::KeyUp {
+                    keycode: Some(Keycode::Up),
+                    ..
+                } => {
+                    input.set(input.get() & 0b11101111);
+                }
+                Event::KeyUp {
+                    keycode: Some(Keycode::Down),
+                    ..
+                } => {
+                    input.set(input.get() & 0b11011111);
+                }
+                Event::KeyUp {
+                    keycode: Some(Keycode::Left),
+                    ..
+                } => {
+                    input.set(input.get() & 0b10111111);
+                }
+                Event::KeyUp {
+                    keycode: Some(Keycode::Right),
+                    ..
+                } => {
+                    input.set(input.get() & 0b01111111);
+                }
+                _ => (),
+            }
+        }
+
+        canvas.present();
+        ::std::thread::sleep(Duration::new(0, 1_000_000_000u32 / 60));
+    }
+}

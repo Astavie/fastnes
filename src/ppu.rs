@@ -8,21 +8,6 @@ pub trait PPU {
 
 pub(crate) struct DummyPPU;
 
-pub(crate) struct FastPPU {
-    open: u8,
-    odd_frame: bool,
-
-    nmi_output: bool,
-    background: bool,
-
-    this_vbl: Option<usize>,
-    next_vbl: usize,
-    next_nmi: Option<usize>,
-}
-
-const SCANLINE: usize = 341;
-const LINES: usize = 262;
-
 impl PPU for DummyPPU {
     fn write(&mut self, _cycle: usize, _addr: u16, _data: u8) {}
     fn read(&mut self, _cycle: usize, _addr: u16) -> u8 {
@@ -36,13 +21,28 @@ impl PPU for DummyPPU {
     }
 }
 
+pub(crate) struct FastPPU {
+    open: u8,
+    odd_frame: bool,
+
+    nmi_output: bool,
+    background: bool,
+
+    this_vbl: Option<usize>,
+    next_vbl: usize,
+    next_nmi: Option<usize>,
+}
+
+const SCANLINE: usize = 341;
+const FRAME: usize = 262 * SCANLINE;
+
 impl FastPPU {
     fn sync(&mut self, cycle: usize) {
         // get next vblank
         while cycle >= self.next_vbl {
             self.this_vbl = Some(self.next_vbl);
             self.odd_frame = !self.odd_frame;
-            self.next_vbl += LINES * SCANLINE - usize::from(self.background && self.odd_frame);
+            self.next_vbl += FRAME - usize::from(self.background && self.odd_frame);
         }
 
         // end vblank after 20 scanlines
@@ -121,15 +121,23 @@ impl PPU for FastPPU {
                     Some(true) => {
                         // enable background
                         if self.odd_frame && cycle < self.next_vbl - 241 * SCANLINE - 3 {
+                            if let Some(next) = self.next_nmi.as_mut() {
+                                if *next == self.next_vbl {
+                                    *next -= 1;
+                                }
+                            }
                             self.next_vbl -= 1;
-                            self.next_nmi();
                         }
                     }
                     Some(false) => {
                         // disable background
                         if self.odd_frame && cycle < self.next_vbl - 241 * SCANLINE - 2 {
+                            if let Some(next) = self.next_nmi.as_mut() {
+                                if *next == self.next_vbl {
+                                    *next += 1;
+                                }
+                            }
                             self.next_vbl += 1;
-                            self.next_nmi();
                         }
                     }
                     None => (),

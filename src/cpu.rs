@@ -1,4 +1,5 @@
 use crate::{
+    controller::Controllers,
     instruction::{instructions, Instructions},
     ppu::PPU,
 };
@@ -30,6 +31,9 @@ pub struct CPU<P: PPU> {
     // ppu
     ppu_cycle: usize,
     ppu: P,
+
+    // controllers
+    controllers: Controllers,
 }
 
 impl<P: PPU> CPU<P> {
@@ -53,7 +57,7 @@ impl<P: PPU> CPU<P> {
         self.SP = 0;
         self.ppu = P::new();
     }
-    pub fn new(rom: [u8; 32768]) -> Self {
+    pub fn new(rom: [u8; 32768], controllers: Controllers) -> Self {
         CPU {
             instructions: instructions(),
             PC: 0,
@@ -71,6 +75,7 @@ impl<P: PPU> CPU<P> {
             nmi_sample: false,
             res_sample: false,
             hardware_interrupt: false,
+            controllers,
         }
     }
     pub fn cycle(&self) -> usize {
@@ -82,7 +87,11 @@ impl<P: PPU> CPU<P> {
         match addr & 0xE000 {
             0x0000 => self.ram_internal[usize::from(addr & 0x07FF)],
             0x2000 => self.ppu.read(self.ppu_cycle, addr),
-            0x4000 => 0, // TODO
+            0x4000 => match addr {
+                0x4016 => self.controllers.read_left(),
+                0x4017 => self.controllers.read_right(),
+                _ => 0, // TODO
+            },
             0x6000 => self.ram_work[usize::from(addr & 0x1FFF)],
             _ => self.rom[usize::from(addr & 0x7FFF)],
         }
@@ -121,7 +130,10 @@ impl<P: PPU> CPU<P> {
             match addr & 0xE000 {
                 0x0000 => self.ram_internal[usize::from(addr & 0x07FF)] = data,
                 0x2000 => self.ppu.write(self.ppu_cycle, addr, data),
-                0x4000 => (), // TODO
+                0x4000 => match addr {
+                    0x4016 => self.controllers.write(data),
+                    _ => (), // TODO
+                },
                 0x6000 => self.ram_work[usize::from(addr & 0x1FFF)] = data,
                 _ => (),
             }
