@@ -3,6 +3,7 @@
 #![feature(adt_const_params)]
 #![feature(generic_const_exprs)]
 #![feature(const_mut_refs)]
+#![feature(is_some_and)]
 
 extern crate test;
 
@@ -10,13 +11,14 @@ mod cpu;
 
 #[cfg(test)]
 mod tests {
+    use repeated::repeated;
     use test::Bencher;
 
     use super::*;
     use std::fs::read;
 
     #[bench]
-    fn nestest(b: &mut Bencher) {
+    fn nestest_dummy(b: &mut Bencher) {
         let mut file = read("test/nestest/nestest.nes").unwrap();
         let bytes = &mut file[16..16400];
         bytes[0xFFFC & 0x3FFF] = 0x00;
@@ -28,6 +30,35 @@ mod tests {
         }
 
         let mut cpu = cpu::CPU::<cpu::DummyPPU>::new(rom);
+
+        b.iter(|| {
+            cpu.reset();
+
+            const END_CYCLE: usize = 26548;
+            const END_ADDR: u16 = 0xC6A2;
+
+            while cpu.ppu_cycle / 3 < END_CYCLE {
+                cpu.instruction();
+            }
+
+            assert_eq!(cpu.ppu_cycle / 3, END_CYCLE);
+            assert_eq!(cpu.PC, END_ADDR);
+        });
+    }
+
+    #[bench]
+    fn nestest_fast(b: &mut Bencher) {
+        let mut file = read("test/nestest/nestest.nes").unwrap();
+        let bytes = &mut file[16..16400];
+        bytes[0xFFFC & 0x3FFF] = 0x00;
+        bytes[0xFFFD & 0x3FFF] = 0xC0;
+
+        let mut rom: [u8; 0x8000] = [0; 0x8000];
+        for i in 0..0x8000 {
+            rom[i] = bytes[i & 0x3FFF]
+        }
+
+        let mut cpu = cpu::CPU::<cpu::FastPPU>::new(rom);
 
         b.iter(|| {
             cpu.reset();
@@ -130,6 +161,31 @@ mod tests {
     fn even_odd_timing() {
         test_file("test/ppu_vbl_nmi/10-even_odd_timing.nes");
     }
+
+    // repeated!(for op in [0;255] {
+
+    //     #[bench]
+    //     fn bench_instr_%%op%%(b: &mut Bencher) {
+    //         let mut file = read("test/nestest/nestest.nes").unwrap();
+    //         let bytes = &mut file[16..16400];
+    //         bytes[0xFFFC & 0x3FFF] = 0x00;
+    //         bytes[0xFFFD & 0x3FFF] = 0xC0;
+
+    //         let mut rom: [u8; 0x8000] = [0; 0x8000];
+    //         for i in 0..0x8000 {
+    //             rom[i] = bytes[i & 0x3FFF]
+    //         }
+
+    //         let mut cpu = cpu::CPU::<cpu::FastPPU>::new(rom);
+    //         cpu.reset();
+    //         cpu.instruction();
+
+    //         let instr = cpu.instructions[%%op%%];
+
+    //         b.iter(|| instr(&mut cpu));
+    //     }
+
+    // });
 }
 
 fn main() {}

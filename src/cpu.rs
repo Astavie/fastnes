@@ -16,16 +16,12 @@ type Instructions<P> = Rc<[Instruction<P>; 256]>;
 #[allow(non_snake_case)]
 pub struct CPU<P: PPU> {
     // instruction list
-    instructions: Instructions<P>,
+    pub(crate) instructions: Instructions<P>,
 
     // rom
     ram_internal: [u8; 0x0800],
     pub(crate) ram_work: [u8; 0x2000],
     rom: [u8; 0x8000],
-
-    // ppu
-    pub(crate) ppu_cycle: usize,
-    ppu: P,
 
     // registers
     pub(crate) PC: u16,
@@ -40,23 +36,28 @@ pub struct CPU<P: PPU> {
     nmi_sample: bool,
     res_sample: bool,
     hardware_interrupt: bool,
+
+    // ppu
+    pub(crate) ppu_cycle: usize,
+    ppu: P,
 }
 
 pub(crate) struct DummyPPU;
 
 pub(crate) struct FastPPU {
-    next_vblank: usize,
-    last_nmi: usize,
     open: u8,
     odd_frame: bool,
 
     nmi_output: bool,
     background: bool,
+
+    this_vbl: Option<usize>,
+    next_vbl: usize,
+    next_nmi: Option<usize>,
 }
 
 const SCANLINE: usize = 341;
 const LINES: usize = 262;
-const MARGIN: usize = 30;
 
 impl PPU for DummyPPU {
     fn write(&mut self, _cycle: usize, _addr: u16, _data: u8) {}
@@ -72,115 +73,143 @@ impl PPU for DummyPPU {
 }
 
 impl FastPPU {
-    fn sync(&mut self, cycle: usize, offset: usize) {
-        while cycle >= self.next_vblank + offset {
+    fn sync(&mut self, cycle: usize) {
+        // get next vblank
+        while cycle >= self.next_vbl {
+            self.this_vbl = Some(self.next_vbl);
             self.odd_frame = !self.odd_frame;
-            self.next_vblank += LINES * SCANLINE - usize::from(self.background && self.odd_frame);
+            self.next_vbl += LINES * SCANLINE - usize::from(self.background && self.odd_frame);
         }
+
+        // end vblank after 20 scanlines
+        self.this_vbl = self.this_vbl.filter(|i| cycle <= i + 20 * SCANLINE);
+
+        // get next nmi signal
+        self.next_nmi();
+    }
+    fn next_nmi(&mut self) {
+        self.next_nmi = if self.nmi_output {
+            Some(self.this_vbl.unwrap_or(self.next_vbl))
+        } else {
+            None
+        };
+    }
+}
+
+fn on_change(var: &mut bool, val: bool) -> Option<bool> {
+    if *var != val {
+        *var = val;
+        Some(val)
+    } else {
+        None
     }
 }
 
 impl PPU for FastPPU {
     fn new() -> Self {
         FastPPU {
-            next_vblank: 241 * SCANLINE + 2,
+            next_vbl: 241 * SCANLINE + 1,
+            this_vbl: None,
+            next_nmi: None,
             nmi_output: false,
             odd_frame: false,
             background: false,
-            last_nmi: 0,
             open: 0,
         }
     }
+
+    // we inline never because this tends to get inlined inside write_addr,
+    // making every instruction slower just to make ppu writes a bit faster
+    #[inline(never)]
     fn write(&mut self, cycle: usize, addr: u16, data: u8) {
         self.open = data;
-        if addr < 0x4000 {
-            match addr & 7 {
-                0 => {
-                    // TODO: the rest
+        match addr & 7 {
+            0 => {
+                // TODO: the rest
 
-                    // NMI
-                    self.nmi_output = data & 0b10000000 != 0;
-                    if !self.nmi_output {
-                        // reset last_nmi on disable so another nmi can occur on enable
-                        self.last_nmi = 0;
-                    } else {
-                        // go to next vblank on enable
-                        self.sync(cycle, 20 * SCANLINE);
+                // NMI
+                match on_change(&mut self.nmi_output, data & 0b10000000 != 0) {
+                    Some(true) => {
+                        // enable
+                        self.sync(cycle);
+                        self.next_nmi = Some(
+                            // ignore last dot of vblank
+                            self.this_vbl
+                                .filter(|i| cycle < i + 20 * SCANLINE)
+                                .unwrap_or(self.next_vbl),
+                        );
                     }
-                }
-                1 => {
-                    // TODO: the rest
-                    self.sync(cycle, 20 * SCANLINE + MARGIN);
-
-                    // background
-                    let old = self.background;
-                    self.background = data & 0b1000 != 0;
-
-                    if !old && self.background {
-                        // enable background
-                        if self.odd_frame && cycle < self.next_vblank - 241 * SCANLINE - 3 {
-                            self.next_vblank -= 1;
-                        }
+                    Some(false) => {
+                        // disable
+                        self.next_nmi = None;
                     }
-
-                    if old && !self.background {
-                        // disable background
-                        if self.odd_frame && cycle < self.next_vblank - 241 * SCANLINE - 2 {
-                            self.next_vblank += 1;
-                        }
-                    }
-                }
-                _ => {
-                    // TODO
+                    None => (),
                 }
             }
-        } else {
-            // TODO
+            1 => {
+                // TODO: the rest
+
+                // background
+                self.sync(cycle);
+                match on_change(&mut self.background, data & 0b1000 != 0) {
+                    Some(true) => {
+                        // enable background
+                        if self.odd_frame && cycle < self.next_vbl - 241 * SCANLINE - 3 {
+                            self.next_vbl -= 1;
+                            self.next_nmi();
+                        }
+                    }
+                    Some(false) => {
+                        // disable background
+                        if self.odd_frame && cycle < self.next_vbl - 241 * SCANLINE - 2 {
+                            self.next_vbl += 1;
+                            self.next_nmi();
+                        }
+                    }
+                    None => (),
+                }
+            }
+            _ => {
+                // TODO
+            }
         }
     }
 
+    // we inline never because this tends to get inlined inside read_addr,
+    // making every instruction slower just to make ppu reads a bit faster
+    #[inline(never)]
     fn read(&mut self, cycle: usize, addr: u16) -> u8 {
-        if addr < 0x4000 {
-            match addr & 7 {
-                2 => {
-                    // TODO: sprite overflow and sprite 0 hit
-                    self.open &= 0b00011111;
+        match addr & 7 {
+            2 => {
+                // TODO: sprite overflow and sprite 0 hit
+                self.open &= 0b00011111;
 
-                    // vblank
-                    self.sync(cycle, 20 * SCANLINE + 1);
+                // vblank
+                self.sync(cycle);
 
-                    if cycle > self.next_vblank {
-                        self.open |= 0b10000000;
-                    }
-
-                    if cycle >= self.next_vblank {
-                        // reset vblank
-                        self.odd_frame = !self.odd_frame;
-                        self.next_vblank +=
-                            LINES * SCANLINE - usize::from(self.background && self.odd_frame);
-                    }
+                if self.this_vbl.is_some_and(|i| cycle != i) {
+                    self.open |= 0b10000000;
                 }
-                _ => {
-                    // TODO
+
+                if self.this_vbl.is_some() {
+                    self.this_vbl = None;
+                    self.next_nmi = None;
                 }
-            };
-        } else {
-            // TODO
-        }
+            }
+            _ => {
+                // TODO
+            }
+        };
         self.open
     }
 
     fn nmi(&mut self, cycle: usize) -> bool {
-        if !self.nmi_output {
-            return false;
-        }
-
-        if self.last_nmi >= self.next_vblank || cycle < self.next_vblank {
-            false
-        } else {
-            self.sync(cycle, 20 * SCANLINE);
-            self.last_nmi = cycle;
+        if self.next_nmi.is_some_and(|i| cycle >= i) {
+            self.sync(cycle);
+            self.next_nmi = Some(self.next_vbl);
             true
+        } else {
+            false
         }
     }
 }
@@ -620,8 +649,6 @@ impl<P: PPU> CPU<P> {
     }
     pub fn instruction(&mut self) {
         // get instruction to perform
-        // self.poll();
-
         let op = if self.nmi_sample || self.irq_sample || self.res_sample {
             self.hardware_interrupt = true;
             self.read_pc();
@@ -683,12 +710,12 @@ impl<P: PPU> CPU<P> {
     fn write_addr(&mut self, addr: u16, data: u8) {
         if !self.res_sample {
             self.ppu_cycle += 3;
-            if addr < 0x2000 {
-                self.ram_internal[usize::from(addr & 0x07FF)] = data;
-            } else if addr < 0x6000 {
-                self.ppu.write(self.ppu_cycle, addr, data);
-            } else if addr < 0x8000 {
-                self.ram_work[usize::from(addr & 0x1FFF)] = data;
+            match addr & 0xE000 {
+                0x0000 => self.ram_internal[usize::from(addr & 0x07FF)] = data,
+                0x2000 => self.ppu.write(self.ppu_cycle, addr, data),
+                0x4000 => (), // TODO
+                0x6000 => self.ram_work[usize::from(addr & 0x1FFF)] = data,
+                _ => (),
             }
         } else {
             self.read_addr(addr);
@@ -696,14 +723,12 @@ impl<P: PPU> CPU<P> {
     }
     fn read_addr(&mut self, addr: u16) -> u8 {
         self.ppu_cycle += 3;
-        if addr < 0x2000 {
-            self.ram_internal[usize::from(addr & 0x07FF)]
-        } else if addr < 0x6000 {
-            self.ppu.read(self.ppu_cycle, addr)
-        } else if addr < 0x8000 {
-            self.ram_work[usize::from(addr & 0x1FFF)]
-        } else {
-            self.rom[usize::from(addr & 0x7FFF)]
+        match addr & 0xE000 {
+            0x0000 => self.ram_internal[usize::from(addr & 0x07FF)],
+            0x2000 => self.ppu.read(self.ppu_cycle, addr),
+            0x4000 => 0, // TODO
+            0x6000 => self.ram_work[usize::from(addr & 0x1FFF)],
+            _ => self.rom[usize::from(addr & 0x7FFF)],
         }
     }
     fn read_ptr_lo(&mut self, ptr: u8) -> u8 {
