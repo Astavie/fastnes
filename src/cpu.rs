@@ -84,13 +84,14 @@ impl<P: PPU> CPU<P> {
 
     // HELPER FUNCTIONS
     pub(crate) fn read(&mut self, addr: u16) -> u8 {
+        // TODO: open bus
         match addr & 0xE000 {
             0x0000 => self.ram_internal[usize::from(addr & 0x07FF)],
             0x2000 => self.ppu.read(self.ppu_cycle, addr),
             0x4000 => match addr {
                 0x4016 => self.controllers.read_left(),
                 0x4017 => self.controllers.read_right(),
-                _ => 0, // TODO
+                _ => todo!("read ${:04X}", addr),
             },
             0x6000 => self.ram_work[usize::from(addr & 0x1FFF)],
             _ => self.rom[usize::from(addr & 0x7FFF)],
@@ -132,7 +133,10 @@ impl<P: PPU> CPU<P> {
                 0x2000 => self.ppu.write(self.ppu_cycle, addr, data),
                 0x4000 => match addr {
                     0x4016 => self.controllers.write(data),
-                    _ => (), // TODO
+                    _ => {
+                        // TODO: Apu
+                        // todo!("write ${:04X} = {:08b}", addr, data)
+                    }
                 },
                 0x6000 => self.ram_work[usize::from(addr & 0x1FFF)] = data,
                 _ => (),

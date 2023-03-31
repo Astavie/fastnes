@@ -53,7 +53,7 @@ struct Unconnected;
 
 impl Controller for Unconnected {
     fn read(&mut self) -> u8 {
-        0
+        0 // TODO: Open bus
     }
     fn write(&mut self, data: u8) {}
 }
