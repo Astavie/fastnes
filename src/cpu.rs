@@ -1,18 +1,21 @@
 use crate::{
+    cartridge::Cartridge,
     controller::Controllers,
     instruction::{instructions, Instructions},
     ppu::PPU,
 };
+
+pub(crate) type DynCartridge = Option<Box<dyn Cartridge>>;
 
 #[allow(non_snake_case)]
 pub struct CPU {
     // instruction list
     instructions: Instructions,
 
-    // rom
+    // memory
+    rom_cache: [u8; 0x8000],
     ram_internal: [u8; 0x0800],
-    ram_work: [u8; 0x2000],
-    rom: [u8; 0x8000],
+    open: u8,
 
     // registers
     pub(crate) PC: u16,
@@ -27,6 +30,9 @@ pub struct CPU {
     pub(crate) nmi_sample: bool,
     pub(crate) res_sample: bool,
     pub(crate) hardware_interrupt: bool,
+
+    // cartridge
+    cart: DynCartridge,
 
     // ppu
     ppu_cycle: usize,
@@ -57,7 +63,11 @@ impl CPU {
         self.SP = 0;
         self.ppu.reset();
     }
-    pub fn new(rom: [u8; 32768], controllers: Controllers, ppu: impl PPU + 'static) -> Self {
+    pub fn new(
+        cart: impl Cartridge + 'static,
+        controllers: Controllers,
+        ppu: impl PPU + 'static,
+    ) -> Self {
         CPU {
             instructions: instructions(),
             PC: 0,
@@ -68,14 +78,15 @@ impl CPU {
             Y: 0,
             ppu_cycle: 0,
             ram_internal: [0; 0x0800],
-            ram_work: [0; 0x2000],
-            rom,
             ppu: Box::new(ppu),
             irq_sample: false,
             nmi_sample: false,
             res_sample: false,
             hardware_interrupt: false,
             controllers,
+            open: 0,
+            rom_cache: cart.cache_prg_rom(),
+            cart: Some(Box::new(cart)),
         }
     }
     pub fn cycle(&self) -> usize {
@@ -92,9 +103,9 @@ impl CPU {
             0x4016 => self.controllers.read_left(),
             0x4017 => self.controllers.read_right(),
             _ => {
-                // TODO: Apu
+                // TODO: APU
                 // todo!("read ${:04X}", addr),
-                0
+                self.open
             }
         }
     }
@@ -106,21 +117,30 @@ impl CPU {
         match addr {
             0x4016 => self.controllers.write(data),
             _ => {
-                // TODO: Apu
+                // TODO: APU
                 // todo!("write ${:04X} = {:08b}", addr, data)
             }
         }
     }
 
     pub(crate) fn read(&mut self, addr: u16) -> u8 {
-        // TODO: open bus
-        match addr & 0xE000 {
+        self.open = match addr & 0xE000 {
             0x0000 => self.ram_internal[usize::from(addr & 0x07FF)],
-            0x2000 => self.ppu.read(self.ppu_cycle, addr),
+            0x2000 => self.ppu.read(self.ppu_cycle, addr, &self.cart),
             0x4000 => self.read_apu(addr),
-            0x6000 => self.ram_work[usize::from(addr & 0x1FFF)],
-            _ => self.rom[usize::from(addr & 0x7FFF)],
-        }
+            0x6000 => self
+                .cart
+                .as_mut()
+                .map(|c| c.read_prg_ram(addr))
+                .flatten()
+                .unwrap_or(self.open),
+            _ => self
+                .cart
+                .as_ref()
+                .map(|_| self.rom_cache[usize::from(addr & 0x7FFF)])
+                .unwrap_or(self.open),
+        };
+        self.open
     }
     pub(crate) fn poll(&mut self) {
         // sample irq and nmi (nmi stays on while irq gets reset every cycle)
@@ -155,10 +175,18 @@ impl CPU {
             self.ppu_cycle += 3;
             match addr & 0xE000 {
                 0x0000 => self.ram_internal[usize::from(addr & 0x07FF)] = data,
-                0x2000 => self.ppu.write(self.ppu_cycle, addr, data),
+                0x2000 => self.ppu.write(self.ppu_cycle, addr, data, &mut self.cart),
                 0x4000 => self.write_apu(addr, data),
-                0x6000 => self.ram_work[usize::from(addr & 0x1FFF)] = data,
-                _ => (),
+                0x6000 => {
+                    if let Some(cart) = self.cart.as_mut() {
+                        cart.write_prg_ram(addr, data);
+                    }
+                }
+                _ => {
+                    if let Some(cart) = self.cart.as_mut() {
+                        cart.write_prg_rom(addr, data, &mut self.rom_cache);
+                    }
+                }
             }
         } else {
             self.read_addr(addr);

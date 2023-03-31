@@ -1,10 +1,10 @@
-use std::{cell::Cell, rc::Weak};
-
 use enumset::{EnumSet, EnumSetType};
 
+use crate::cpu::DynCartridge;
+
 pub trait PPU {
-    fn write(&mut self, cycle: usize, addr: u16, data: u8);
-    fn read(&mut self, cycle: usize, addr: u16) -> u8;
+    fn write(&mut self, cycle: usize, addr: u16, data: u8, cart: &mut DynCartridge);
+    fn read(&mut self, cycle: usize, addr: u16, cart: &DynCartridge) -> u8;
 
     fn nmi(&mut self, cycle: usize) -> bool;
     fn reset(&mut self);
@@ -13,10 +13,11 @@ pub trait PPU {
 pub(crate) struct DummyPPU;
 
 impl PPU for DummyPPU {
-    fn write(&mut self, _cycle: usize, _addr: u16, _data: u8) {}
-    fn read(&mut self, _cycle: usize, _addr: u16) -> u8 {
+    fn write(&mut self, _cycle: usize, _addr: u16, _data: u8, _cart: &mut DynCartridge) {}
+    fn read(&mut self, _cycle: usize, _addr: u16, _cart: &DynCartridge) -> u8 {
         0
     }
+
     fn nmi(&mut self, _cycle: usize) -> bool {
         false
     }
@@ -30,11 +31,11 @@ enum Direction {
 }
 
 impl Direction {
-    fn increment(&self, addr: u16) -> u16 {
-        match self {
-            Self::Across => addr + 1,
-            Self::Down => addr + 32,
-        }
+    fn increment(&self, addr: &mut u16) {
+        *addr = (match self {
+            Self::Across => *addr + 1,
+            Self::Down => *addr + 32,
+        }) & 0x3FFF;
     }
 }
 
@@ -154,12 +155,6 @@ pub(crate) struct FastPPU {
     nmi_output: bool,
 
     // memory
-    pattern_table_0: Weak<Cell<[u8; 0x1000]>>,
-    pattern_table_1: Weak<Cell<[u8; 0x1000]>>,
-    nametable_0: Weak<Cell<[u8; 0x0400]>>,
-    nametable_1: Weak<Cell<[u8; 0x0400]>>,
-    nametable_2: Weak<Cell<[u8; 0x0400]>>,
-    nametable_3: Weak<Cell<[u8; 0x0400]>>,
     palette_ram: [u8; 0x0020],
 }
 
@@ -188,12 +183,6 @@ impl FastPPU {
             nmi_output: false,
 
             // memory
-            pattern_table_0: Weak::new(),
-            pattern_table_1: Weak::new(),
-            nametable_0: Weak::new(),
-            nametable_1: Weak::new(),
-            nametable_2: Weak::new(),
-            nametable_3: Weak::new(),
             palette_ram: [0; 0x0020],
         }
     }
@@ -231,7 +220,7 @@ fn on_change(var: &mut bool, val: bool) -> Option<bool> {
 }
 
 impl PPU for FastPPU {
-    fn write(&mut self, cycle: usize, addr: u16, data: u8) {
+    fn write(&mut self, cycle: usize, addr: u16, data: u8, cart: &mut DynCartridge) {
         self.open = data;
         match addr & 7 {
             // PPUCTRL
@@ -297,17 +286,34 @@ impl PPU for FastPPU {
             }
             // PPUADDR
             6 => {
-                self.PPUADDR = (self.PPUADDR << 8) | u16::from(data);
+                self.PPUADDR = ((self.PPUADDR << 8) | u16::from(data)) & 0x3FFF;
             }
             // PPUDATA
             7 => {
-                // TODO
+                if self.PPUADDR >= 0x3F00 && self.PPUADDR < 0x3F20 {
+                    // palette ram
+                    self.palette_ram[usize::from(self.PPUADDR as u8)] = data;
+                } else if let Some(cart) = cart.as_mut() {
+                    match self.PPUADDR & 0x3000 {
+                        // pattern table
+                        0x0000 | 0x1000 => cart.write_chr(self.PPUADDR, data),
+
+                        // nametable
+                        0x2000 => cart.write_nametable(self.PPUADDR, data),
+                        0x3000 => cart.write_nametable(self.PPUADDR - 0x1000, data),
+
+                        _ => unreachable!(),
+                    }
+                }
+
+                // increment PPUADDR
+                self.vram_direction.increment(&mut self.PPUADDR);
             }
             _ => todo!("write ${:04X} = {:08b}", addr, data),
         }
     }
 
-    fn read(&mut self, cycle: usize, addr: u16) -> u8 {
+    fn read(&mut self, cycle: usize, addr: u16, cart: &DynCartridge) -> u8 {
         match addr & 7 {
             // PPUSTATUS
             2 => {

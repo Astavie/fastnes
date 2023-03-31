@@ -16,6 +16,7 @@ use sdl2::render::TextureQuery;
 
 extern crate test;
 
+mod cartridge;
 mod controller;
 mod cpu;
 mod instruction;
@@ -35,12 +36,16 @@ mod tests {
         bytes[0xFFFC & 0x3FFF] = 0x00;
         bytes[0xFFFD & 0x3FFF] = 0xC0;
 
-        let mut rom: [u8; 0x8000] = [0; 0x8000];
-        for i in 0..0x8000 {
-            rom[i] = bytes[i & 0x3FFF]
-        }
-
-        let mut cpu = cpu::CPU::new(rom, controller::Controllers::disconnected(), ppu::DummyPPU);
+        let cartridge = cartridge::NROM::new_128(
+            cartridge::Mirroring::Horizontal,
+            [0; 0x2000],
+            bytes.try_into().unwrap(),
+        );
+        let mut cpu = cpu::CPU::new(
+            cartridge,
+            controller::Controllers::disconnected(),
+            ppu::DummyPPU,
+        );
 
         b.iter(|| {
             cpu.reset();
@@ -64,13 +69,13 @@ mod tests {
         bytes[0xFFFC & 0x3FFF] = 0x00;
         bytes[0xFFFD & 0x3FFF] = 0xC0;
 
-        let mut rom: [u8; 0x8000] = [0; 0x8000];
-        for i in 0..0x8000 {
-            rom[i] = bytes[i & 0x3FFF]
-        }
-
+        let cartridge = cartridge::NROM::new_128(
+            cartridge::Mirroring::Horizontal,
+            [0; 0x2000],
+            bytes.try_into().unwrap(),
+        );
         let mut cpu = cpu::CPU::new(
-            rom,
+            cartridge,
             controller::Controllers::disconnected(),
             ppu::FastPPU::new(),
         );
@@ -91,12 +96,15 @@ mod tests {
     }
 
     fn test_file(file: &str) {
-        let mut file = read(file).unwrap();
-        let rom = &mut file[16..32784];
-        let rom: [u8; 0x8000] = rom.try_into().unwrap();
+        let file = read(file).unwrap();
 
+        let cartridge = cartridge::NROM::new_256(
+            cartridge::Mirroring::Horizontal,
+            [0; 0x2000],
+            file[16..32784].try_into().unwrap(),
+        );
         let mut cpu = cpu::CPU::new(
-            rom,
+            cartridge,
             controller::Controllers::disconnected(),
             ppu::FastPPU::new(),
         );
@@ -187,25 +195,32 @@ fn open_file(
     controllers: controller::Controllers,
     ppu: impl ppu::PPU + 'static,
 ) -> cpu::CPU {
-    let mut file = read(path).unwrap();
+    let file = read(path).unwrap();
 
-    let rom: [u8; 0x8000] = match file[4] {
-        1 => {
-            let bytes = &mut file[16..16400];
-            let mut rom: [u8; 0x8000] = [0; 0x8000];
-            for i in 0..0x8000 {
-                rom[i] = bytes[i & 0x3FFF]
-            }
-            rom
-        }
-        2 => {
-            let bytes = &mut file[16..32784];
-            bytes.try_into().unwrap()
-        }
+    let chr_start = 16 + 0x4000 * usize::from(file[4]);
+    let chr_end = chr_start + 0x2000;
+
+    let chr = match file[5] {
+        0 => [0; 0x2000],
+        1 => file[chr_start..chr_end].try_into().unwrap(),
         _ => panic!(),
     };
 
-    cpu::CPU::new(rom, controllers, ppu)
+    let cartridge = match file[4] {
+        1 => cartridge::NROM::new_128(
+            cartridge::Mirroring::Horizontal,
+            chr,
+            file[16..chr_start].try_into().unwrap(),
+        ),
+        2 => cartridge::NROM::new_256(
+            cartridge::Mirroring::Horizontal,
+            chr,
+            file[16..chr_start].try_into().unwrap(),
+        ),
+        _ => panic!(),
+    };
+
+    cpu::CPU::new(cartridge, controllers, ppu)
 }
 
 fn main() {
