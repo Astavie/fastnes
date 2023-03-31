@@ -40,7 +40,7 @@ mod tests {
             rom[i] = bytes[i & 0x3FFF]
         }
 
-        let mut cpu = cpu::CPU::<ppu::DummyPPU>::new(rom, controller::Controllers::disconnected());
+        let mut cpu = cpu::CPU::new(rom, controller::Controllers::disconnected(), ppu::DummyPPU);
 
         b.iter(|| {
             cpu.reset();
@@ -69,7 +69,11 @@ mod tests {
             rom[i] = bytes[i & 0x3FFF]
         }
 
-        let mut cpu = cpu::CPU::<ppu::FastPPU>::new(rom, controller::Controllers::disconnected());
+        let mut cpu = cpu::CPU::new(
+            rom,
+            controller::Controllers::disconnected(),
+            ppu::FastPPU::new(),
+        );
 
         b.iter(|| {
             cpu.reset();
@@ -91,7 +95,11 @@ mod tests {
         let rom = &mut file[16..32784];
         let rom: [u8; 0x8000] = rom.try_into().unwrap();
 
-        let mut cpu = cpu::CPU::<ppu::FastPPU>::new(rom, controller::Controllers::disconnected());
+        let mut cpu = cpu::CPU::new(
+            rom,
+            controller::Controllers::disconnected(),
+            ppu::FastPPU::new(),
+        );
 
         cpu.reset();
 
@@ -174,7 +182,11 @@ mod tests {
     }
 }
 
-fn open_file<P: ppu::PPU>(path: &str, controllers: controller::Controllers) -> cpu::CPU<P> {
+fn open_file(
+    path: &str,
+    controllers: controller::Controllers,
+    ppu: impl ppu::PPU + 'static,
+) -> cpu::CPU {
     let mut file = read(path).unwrap();
 
     let rom: [u8; 0x8000] = match file[4] {
@@ -193,7 +205,7 @@ fn open_file<P: ppu::PPU>(path: &str, controllers: controller::Controllers) -> c
         _ => panic!(),
     };
 
-    cpu::CPU::new(rom, controllers)
+    cpu::CPU::new(rom, controllers, ppu)
 }
 
 fn main() {
@@ -213,7 +225,7 @@ fn main() {
     canvas.present();
 
     let (controllers, input) = controller::Controllers::standard();
-    let mut cpu = open_file::<ppu::FastPPU>("test/color_test.nes", controllers);
+    let mut cpu = open_file("test/color_test.nes", controllers, ppu::FastPPU::new());
     cpu.reset();
 
     let mut cycle_target = 0;

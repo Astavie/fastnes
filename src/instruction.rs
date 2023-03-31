@@ -2,21 +2,21 @@ use crate::{cpu::CPU, ppu::PPU};
 use repeated::repeated;
 use std::{fmt::Debug, rc::Rc};
 
-pub type Instruction<P> = fn(&mut CPU<P>);
-pub type Instructions<P> = Rc<[Instruction<P>; 256]>;
+pub type Instruction = fn(&mut CPU);
+pub type Instructions = Rc<[Instruction; 256]>;
 
 trait Addressable {
-    fn poke<P: PPU>(&self, cpu: &mut CPU<P>);
-    fn read<P: PPU>(&self, cpu: &mut CPU<P>) -> u8;
-    fn write<P: PPU>(&self, cpu: &mut CPU<P>, data: u8);
+    fn poke(&self, cpu: &mut CPU);
+    fn read(&self, cpu: &mut CPU) -> u8;
+    fn write(&self, cpu: &mut CPU, data: u8);
 
-    fn read_flags<P: PPU>(&self, cpu: &mut CPU<P>) -> u8 {
+    fn read_flags(&self, cpu: &mut CPU) -> u8 {
         let data = self.read(cpu);
         cpu.flags(data);
         data
     }
 
-    fn compare<P: PPU>(&self, cpu: &mut CPU<P>, reg: u8) {
+    fn compare(&self, cpu: &mut CPU, reg: u8) {
         let data = self.read(cpu);
         cpu.compare(data, reg);
     }
@@ -26,33 +26,33 @@ struct Accumulator();
 struct Implied();
 
 impl Addressable for Accumulator {
-    fn poke<P: PPU>(&self, _cpu: &mut CPU<P>) {}
-    fn read<P: PPU>(&self, cpu: &mut CPU<P>) -> u8 {
+    fn poke(&self, _cpu: &mut CPU) {}
+    fn read(&self, cpu: &mut CPU) -> u8 {
         cpu.A
     }
-    fn write<P: PPU>(&self, cpu: &mut CPU<P>, data: u8) {
+    fn write(&self, cpu: &mut CPU, data: u8) {
         cpu.A = data;
     }
 }
 
 impl Addressable for Implied {
-    fn poke<P: PPU>(&self, _cpu: &mut CPU<P>) {}
-    fn read<P: PPU>(&self, _cpu: &mut CPU<P>) -> u8 {
+    fn poke(&self, _cpu: &mut CPU) {}
+    fn read(&self, _cpu: &mut CPU) -> u8 {
         unreachable!();
     }
-    fn write<P: PPU>(&self, _cpu: &mut CPU<P>, _data: u8) {
+    fn write(&self, _cpu: &mut CPU, _data: u8) {
         unreachable!();
     }
 }
 
 impl Addressable for u16 {
-    fn poke<P: PPU>(&self, cpu: &mut CPU<P>) {
+    fn poke(&self, cpu: &mut CPU) {
         cpu.read_addr(*self);
     }
-    fn read<P: PPU>(&self, cpu: &mut CPU<P>) -> u8 {
+    fn read(&self, cpu: &mut CPU) -> u8 {
         cpu.read_addr(*self)
     }
-    fn write<P: PPU>(&self, cpu: &mut CPU<P>, data: u8) {
+    fn write(&self, cpu: &mut CPU, data: u8) {
         cpu.write_addr(*self, data)
     }
 }
@@ -137,7 +137,7 @@ impl Micro {
             }
         }
     }
-    const fn instruction<P: PPU, A: Addressable, const S: Micro>() -> fn(&mut CPU<P>, A) {
+    const fn instruction<A: Addressable, const S: Micro>() -> fn(&mut CPU, A) {
         match S {
             Micro::ASL => |cpu, addr| {
                 let data = addr.read(cpu);
@@ -538,20 +538,20 @@ pub enum Mode {
 struct ModeEval<const N: Mode>;
 struct MicroEval<const N: Micro>;
 
-const fn instruction<P: PPU, const OP: u8>() -> Instruction<P>
+const fn instruction<const OP: u8>() -> Instruction
 where
     ModeEval<{ Mode::from::<OP>() }>: Sized,
     MicroEval<{ Micro::from::<OP>() }>: Sized,
 {
     match OP {
-        0x10 => branch::<0b10000000, true, P>(),
-        0x30 => branch::<0b10000000, false, P>(),
-        0x50 => branch::<0b01000000, true, P>(),
-        0x70 => branch::<0b01000000, false, P>(),
-        0x90 => branch::<0b00000001, true, P>(),
-        0xB0 => branch::<0b00000001, false, P>(),
-        0xD0 => branch::<0b00000010, true, P>(),
-        0xF0 => branch::<0b00000010, false, P>(),
+        0x10 => branch::<0b10000000, true>(),
+        0x30 => branch::<0b10000000, false>(),
+        0x50 => branch::<0b01000000, true>(),
+        0x70 => branch::<0b01000000, false>(),
+        0x90 => branch::<0b00000001, true>(),
+        0xB0 => branch::<0b00000001, false>(),
+        0xD0 => branch::<0b00000010, true>(),
+        0xF0 => branch::<0b00000010, false>(),
 
         0x00 => |cpu| {
             // BRK
@@ -686,41 +686,41 @@ where
             cpu.PC = u16::from(lo) | u16::from(hi) << 8;
         },
 
-        0x18 => Mode::instruction::<P, { Mode::Implied }, { Micro::CLC }>(),
-        0x38 => Mode::instruction::<P, { Mode::Implied }, { Micro::SEC }>(),
-        0x58 => Mode::instruction::<P, { Mode::Implied }, { Micro::CLI }>(),
-        0x78 => Mode::instruction::<P, { Mode::Implied }, { Micro::SEI }>(),
-        0x88 => Mode::instruction::<P, { Mode::Implied }, { Micro::DEY }>(),
-        0x8A => Mode::instruction::<P, { Mode::Implied }, { Micro::TXA }>(),
-        0x98 => Mode::instruction::<P, { Mode::Implied }, { Micro::TYA }>(),
-        0x9A => Mode::instruction::<P, { Mode::Implied }, { Micro::TXS }>(),
-        0xA8 => Mode::instruction::<P, { Mode::Implied }, { Micro::TAY }>(),
-        0xAA => Mode::instruction::<P, { Mode::Implied }, { Micro::TAX }>(),
-        0xB8 => Mode::instruction::<P, { Mode::Implied }, { Micro::CLV }>(),
-        0xBA => Mode::instruction::<P, { Mode::Implied }, { Micro::TSX }>(),
-        0xC8 => Mode::instruction::<P, { Mode::Implied }, { Micro::INY }>(),
-        0xCA => Mode::instruction::<P, { Mode::Implied }, { Micro::DEX }>(),
-        0xD8 => Mode::instruction::<P, { Mode::Implied }, { Micro::CLD }>(),
-        0xE8 => Mode::instruction::<P, { Mode::Implied }, { Micro::INX }>(),
-        0xEA => Mode::instruction::<P, { Mode::Implied }, { Micro::NOP }>(),
-        0xF8 => Mode::instruction::<P, { Mode::Implied }, { Micro::SED }>(),
+        0x18 => Mode::instruction::<{ Mode::Implied }, { Micro::CLC }>(),
+        0x38 => Mode::instruction::<{ Mode::Implied }, { Micro::SEC }>(),
+        0x58 => Mode::instruction::<{ Mode::Implied }, { Micro::CLI }>(),
+        0x78 => Mode::instruction::<{ Mode::Implied }, { Micro::SEI }>(),
+        0x88 => Mode::instruction::<{ Mode::Implied }, { Micro::DEY }>(),
+        0x8A => Mode::instruction::<{ Mode::Implied }, { Micro::TXA }>(),
+        0x98 => Mode::instruction::<{ Mode::Implied }, { Micro::TYA }>(),
+        0x9A => Mode::instruction::<{ Mode::Implied }, { Micro::TXS }>(),
+        0xA8 => Mode::instruction::<{ Mode::Implied }, { Micro::TAY }>(),
+        0xAA => Mode::instruction::<{ Mode::Implied }, { Micro::TAX }>(),
+        0xB8 => Mode::instruction::<{ Mode::Implied }, { Micro::CLV }>(),
+        0xBA => Mode::instruction::<{ Mode::Implied }, { Micro::TSX }>(),
+        0xC8 => Mode::instruction::<{ Mode::Implied }, { Micro::INY }>(),
+        0xCA => Mode::instruction::<{ Mode::Implied }, { Micro::DEX }>(),
+        0xD8 => Mode::instruction::<{ Mode::Implied }, { Micro::CLD }>(),
+        0xE8 => Mode::instruction::<{ Mode::Implied }, { Micro::INX }>(),
+        0xEA => Mode::instruction::<{ Mode::Implied }, { Micro::NOP }>(),
+        0xF8 => Mode::instruction::<{ Mode::Implied }, { Micro::SED }>(),
 
         // illegal
-        0xBB => Mode::instruction::<P, { Mode::AbsoluteIndexed(Index::Y) }, { Micro::LAS }>(),
-        0xEB => Mode::instruction::<P, { Mode::Immediate }, { Micro::SBC }>(),
+        0xBB => Mode::instruction::<{ Mode::AbsoluteIndexed(Index::Y) }, { Micro::LAS }>(),
+        0xEB => Mode::instruction::<{ Mode::Immediate }, { Micro::SBC }>(),
 
         // unstable
-        0x9B => Mode::instruction::<P, { Mode::AbsoluteIndexed(Index::Y) }, { Micro::TAS }>(),
-        0x93 => Mode::instruction::<P, { Mode::IndirectIndexed }, { Micro::SHA }>(),
-        0x9C => Mode::instruction::<P, { Mode::AbsoluteIndexed(Index::X) }, { Micro::SHY }>(),
-        0x9E => Mode::instruction::<P, { Mode::AbsoluteIndexed(Index::Y) }, { Micro::SHX }>(),
-        0x9F => Mode::instruction::<P, { Mode::AbsoluteIndexed(Index::Y) }, { Micro::SHA }>(),
+        0x9B => Mode::instruction::<{ Mode::AbsoluteIndexed(Index::Y) }, { Micro::TAS }>(),
+        0x93 => Mode::instruction::<{ Mode::IndirectIndexed }, { Micro::SHA }>(),
+        0x9C => Mode::instruction::<{ Mode::AbsoluteIndexed(Index::X) }, { Micro::SHY }>(),
+        0x9E => Mode::instruction::<{ Mode::AbsoluteIndexed(Index::Y) }, { Micro::SHX }>(),
+        0x9F => Mode::instruction::<{ Mode::AbsoluteIndexed(Index::Y) }, { Micro::SHA }>(),
 
         // highly unstable
-        0xAB => Mode::instruction::<P, { Mode::Immediate }, { Micro::LXA }>(),
-        0x8B => Mode::instruction::<P, { Mode::Immediate }, { Micro::ANE }>(),
+        0xAB => Mode::instruction::<{ Mode::Immediate }, { Micro::LXA }>(),
+        0x8B => Mode::instruction::<{ Mode::Immediate }, { Micro::ANE }>(),
 
-        _ => Mode::instruction::<P, { Mode::from::<OP>() }, { Micro::from::<OP>() }>(),
+        _ => Mode::instruction::<{ Mode::from::<OP>() }, { Micro::from::<OP>() }>(),
     }
 }
 
@@ -752,24 +752,24 @@ impl Mode {
             _ => unreachable!(),
         }
     }
-    const fn instruction<P: PPU, const S: Mode, const M: Micro>() -> Instruction<P> {
+    const fn instruction<const S: Mode, const M: Micro>() -> Instruction {
         match S {
             Mode::Accumulator => |cpu| {
                 cpu.poll();
 
                 cpu.poke_pc();
-                Micro::instruction::<P, Accumulator, M>()(cpu, Accumulator());
+                Micro::instruction::<Accumulator, M>()(cpu, Accumulator());
             },
             Mode::Implied => |cpu| {
                 cpu.poll();
 
                 cpu.poke_pc();
-                Micro::instruction::<P, Implied, M>()(cpu, Implied());
+                Micro::instruction::<Implied, M>()(cpu, Implied());
             },
             Mode::Immediate => |cpu| {
                 cpu.poll();
 
-                Micro::instruction::<P, u16, M>()(cpu, cpu.PC);
+                Micro::instruction::<u16, M>()(cpu, cpu.PC);
                 cpu.PC = cpu.PC.wrapping_add(1);
             },
             Mode::Absolute => |cpu| {
@@ -779,14 +779,14 @@ impl Mode {
 
                 cpu.poll();
 
-                Micro::instruction::<P, u16, M>()(cpu, addr);
+                Micro::instruction::<u16, M>()(cpu, addr);
             },
             Mode::ZeroPage => |cpu| {
                 let addr = u16::from(cpu.read_pc());
 
                 cpu.poll();
 
-                Micro::instruction::<P, u16, M>()(cpu, addr);
+                Micro::instruction::<u16, M>()(cpu, addr);
             },
             Mode::ZeroPageIndexed(i) => match i {
                 Index::X => |cpu| {
@@ -797,7 +797,7 @@ impl Mode {
 
                     cpu.poll();
 
-                    Micro::instruction::<P, u16, M>()(cpu, addr);
+                    Micro::instruction::<u16, M>()(cpu, addr);
                 },
                 Index::Y => |cpu| {
                     let ptr = cpu.read_pc();
@@ -807,7 +807,7 @@ impl Mode {
 
                     cpu.poll();
 
-                    Micro::instruction::<P, u16, M>()(cpu, addr);
+                    Micro::instruction::<u16, M>()(cpu, addr);
                 },
             },
             Mode::AbsoluteIndexed(i) => match i {
@@ -823,7 +823,7 @@ impl Mode {
 
                         cpu.poll();
 
-                        Micro::instruction::<P, u16, M>()(cpu, addr.wrapping_add(0x0100));
+                        Micro::instruction::<u16, M>()(cpu, addr.wrapping_add(0x0100));
                     } else {
                         match M {
                             Micro::LDA
@@ -847,7 +847,7 @@ impl Mode {
 
                         cpu.poll();
 
-                        Micro::instruction::<P, u16, M>()(cpu, addr);
+                        Micro::instruction::<u16, M>()(cpu, addr);
                     }
                 },
                 Index::Y => |cpu| {
@@ -862,7 +862,7 @@ impl Mode {
 
                         cpu.poll();
 
-                        Micro::instruction::<P, u16, M>()(cpu, addr.wrapping_add(0x0100));
+                        Micro::instruction::<u16, M>()(cpu, addr.wrapping_add(0x0100));
                     } else {
                         match M {
                             Micro::LDA
@@ -886,7 +886,7 @@ impl Mode {
 
                         cpu.poll();
 
-                        Micro::instruction::<P, u16, M>()(cpu, addr);
+                        Micro::instruction::<u16, M>()(cpu, addr);
                     }
                 },
             },
@@ -901,7 +901,7 @@ impl Mode {
 
                 cpu.poll();
 
-                Micro::instruction::<P, u16, M>()(cpu, addr);
+                Micro::instruction::<u16, M>()(cpu, addr);
             },
             Mode::IndirectIndexed => |cpu| {
                 let ptr = cpu.read_pc();
@@ -914,7 +914,7 @@ impl Mode {
 
                     cpu.poll();
 
-                    Micro::instruction::<P, u16, M>()(cpu, addr.wrapping_add(0x0100));
+                    Micro::instruction::<u16, M>()(cpu, addr.wrapping_add(0x0100));
                 } else {
                     match M {
                         Micro::LDA
@@ -938,7 +938,7 @@ impl Mode {
 
                     cpu.poll();
 
-                    Micro::instruction::<P, u16, M>()(cpu, addr);
+                    Micro::instruction::<u16, M>()(cpu, addr);
                 }
             },
             Mode::Jam => |_cpu| {
@@ -948,7 +948,7 @@ impl Mode {
     }
 }
 
-const fn branch<const MASK: u8, const ZERO: bool, P: PPU>() -> Instruction<P> {
+const fn branch<const MASK: u8, const ZERO: bool>() -> Instruction {
     |cpu| {
         if (cpu.P & MASK == 0) == ZERO {
             let oper = cpu.read_pc();
@@ -973,11 +973,11 @@ const fn branch<const MASK: u8, const ZERO: bool, P: PPU>() -> Instruction<P> {
     }
 }
 
-pub fn instructions<P: PPU>() -> Instructions<P> {
+pub fn instructions() -> Instructions {
     Rc::new(repeated!(
         %%s prelude [ prelude s%%
         for op in [0;255] {
-            instruction::<P, %%op%%>(),
+            instruction::<%%op%%>(),
         }
         %%e postlude ] postlude e%%
     ))

@@ -5,9 +5,9 @@ use crate::{
 };
 
 #[allow(non_snake_case)]
-pub struct CPU<P: PPU> {
+pub struct CPU {
     // instruction list
-    instructions: Instructions<P>,
+    instructions: Instructions,
 
     // rom
     ram_internal: [u8; 0x0800],
@@ -30,13 +30,13 @@ pub struct CPU<P: PPU> {
 
     // ppu
     ppu_cycle: usize,
-    ppu: P,
+    ppu: Box<dyn PPU>,
 
     // controllers
     controllers: Controllers,
 }
 
-impl<P: PPU> CPU<P> {
+impl CPU {
     // PUBLIC INTERFACE
     pub fn instruction(&mut self) {
         // get instruction to perform
@@ -55,9 +55,9 @@ impl<P: PPU> CPU<P> {
         self.res_sample = true;
         self.ppu_cycle = 0;
         self.SP = 0;
-        self.ppu = P::new();
+        self.ppu.reset();
     }
-    pub fn new(rom: [u8; 32768], controllers: Controllers) -> Self {
+    pub fn new(rom: [u8; 32768], controllers: Controllers, ppu: impl PPU + 'static) -> Self {
         CPU {
             instructions: instructions(),
             PC: 0,
@@ -70,7 +70,7 @@ impl<P: PPU> CPU<P> {
             ram_internal: [0; 0x0800],
             ram_work: [0; 0x2000],
             rom,
-            ppu: P::new(),
+            ppu: Box::new(ppu),
             irq_sample: false,
             nmi_sample: false,
             res_sample: false,
@@ -83,16 +83,41 @@ impl<P: PPU> CPU<P> {
     }
 
     // HELPER FUNCTIONS
+
+    // `read_addr` and `write_addr` need to be very short apparently for the fastest runtime
+    // so we are splitting off rare code paths into seperate functions that must not be inlined
+    #[inline(never)]
+    fn read_apu(&mut self, addr: u16) -> u8 {
+        match addr {
+            0x4016 => self.controllers.read_left(),
+            0x4017 => self.controllers.read_right(),
+            _ => {
+                // TODO: Apu
+                // todo!("read ${:04X}", addr),
+                0
+            }
+        }
+    }
+
+    // `read_addr` and `write_addr` need to be very short apparently for the fastest runtime
+    // so we are splitting off rare code paths into seperate functions that must not be inlined
+    #[inline(never)]
+    fn write_apu(&mut self, addr: u16, data: u8) {
+        match addr {
+            0x4016 => self.controllers.write(data),
+            _ => {
+                // TODO: Apu
+                // todo!("write ${:04X} = {:08b}", addr, data)
+            }
+        }
+    }
+
     pub(crate) fn read(&mut self, addr: u16) -> u8 {
         // TODO: open bus
         match addr & 0xE000 {
             0x0000 => self.ram_internal[usize::from(addr & 0x07FF)],
             0x2000 => self.ppu.read(self.ppu_cycle, addr),
-            0x4000 => match addr {
-                0x4016 => self.controllers.read_left(),
-                0x4017 => self.controllers.read_right(),
-                _ => todo!("read ${:04X}", addr),
-            },
+            0x4000 => self.read_apu(addr),
             0x6000 => self.ram_work[usize::from(addr & 0x1FFF)],
             _ => self.rom[usize::from(addr & 0x7FFF)],
         }
@@ -131,13 +156,7 @@ impl<P: PPU> CPU<P> {
             match addr & 0xE000 {
                 0x0000 => self.ram_internal[usize::from(addr & 0x07FF)] = data,
                 0x2000 => self.ppu.write(self.ppu_cycle, addr, data),
-                0x4000 => match addr {
-                    0x4016 => self.controllers.write(data),
-                    _ => {
-                        // TODO: Apu
-                        // todo!("write ${:04X} = {:08b}", addr, data)
-                    }
-                },
+                0x4000 => self.write_apu(addr, data),
                 0x6000 => self.ram_work[usize::from(addr & 0x1FFF)] = data,
                 _ => (),
             }

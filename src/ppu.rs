@@ -1,3 +1,5 @@
+use std::{cell::Cell, rc::Weak};
+
 use enumset::{EnumSet, EnumSetType};
 
 pub trait PPU {
@@ -5,7 +7,7 @@ pub trait PPU {
     fn read(&mut self, cycle: usize, addr: u16) -> u8;
 
     fn nmi(&mut self, cycle: usize) -> bool;
-    fn new() -> Self;
+    fn reset(&mut self);
 }
 
 pub(crate) struct DummyPPU;
@@ -18,9 +20,7 @@ impl PPU for DummyPPU {
     fn nmi(&mut self, _cycle: usize) -> bool {
         false
     }
-    fn new() -> Self {
-        DummyPPU
-    }
+    fn reset(&mut self) {}
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -49,14 +49,14 @@ impl From<bool> for Direction {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Quadrant {
+enum Nametable {
     TopLeft,
     TopRight,
     BottomLeft,
     BottomRight,
 }
 
-impl From<u8> for Quadrant {
+impl From<u8> for Nametable {
     fn from(value: u8) -> Self {
         match value {
             0 => Self::TopLeft,
@@ -68,24 +68,24 @@ impl From<u8> for Quadrant {
     }
 }
 
-impl Quadrant {
-    fn nametable(&self) -> u16 {
+impl Nametable {
+    fn addr(&self) -> u16 {
         match self {
-            Quadrant::TopLeft => 0x2000,
-            Quadrant::TopRight => 0x2400,
-            Quadrant::BottomLeft => 0x2800,
-            Quadrant::BottomRight => 0x2C00,
+            Nametable::TopLeft => 0x2000,
+            Nametable::TopRight => 0x2400,
+            Nametable::BottomLeft => 0x2800,
+            Nametable::BottomRight => 0x2C00,
         }
     }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Half {
+enum PatternTable {
     Left,
     Right,
 }
 
-impl From<bool> for Half {
+impl From<bool> for PatternTable {
     fn from(value: bool) -> Self {
         if value {
             Self::Right
@@ -95,11 +95,11 @@ impl From<bool> for Half {
     }
 }
 
-impl Half {
-    fn pattern_table(&self) -> u16 {
+impl PatternTable {
+    fn addr(&self) -> u16 {
         match self {
-            Half::Left => 0x0000,
-            Half::Right => 0x1000,
+            PatternTable::Left => 0x0000,
+            PatternTable::Right => 0x1000,
         }
     }
 }
@@ -146,18 +146,57 @@ pub(crate) struct FastPPU {
     PPUMASK: EnumSet<PPUMASK>,
 
     // PPUCTRL
-    nametable: Quadrant,
+    nametable: Nametable,
     vram_direction: Direction,
-    sprite_table: Half,
-    background_table: Half,
+    sprite_table: PatternTable,
+    background_table: PatternTable,
     sprite_size: SpriteSize,
     nmi_output: bool,
+
+    // memory
+    pattern_table_0: Weak<Cell<[u8; 0x1000]>>,
+    pattern_table_1: Weak<Cell<[u8; 0x1000]>>,
+    nametable_0: Weak<Cell<[u8; 0x0400]>>,
+    nametable_1: Weak<Cell<[u8; 0x0400]>>,
+    nametable_2: Weak<Cell<[u8; 0x0400]>>,
+    nametable_3: Weak<Cell<[u8; 0x0400]>>,
+    palette_ram: [u8; 0x0020],
 }
 
 const SCANLINE: usize = 341;
 const FRAME: usize = 262 * SCANLINE;
 
 impl FastPPU {
+    pub fn new() -> Self {
+        FastPPU {
+            next_vbl: 241 * SCANLINE + 1,
+            this_vbl: None,
+            next_nmi: None,
+            odd_frame: false,
+            open: 0,
+
+            // registers
+            PPUADDR: 0,
+            PPUMASK: EnumSet::new(),
+
+            // PPUCTRL
+            nametable: Nametable::TopLeft,
+            vram_direction: Direction::Across,
+            sprite_table: PatternTable::Left,
+            background_table: PatternTable::Left,
+            sprite_size: SpriteSize::Small,
+            nmi_output: false,
+
+            // memory
+            pattern_table_0: Weak::new(),
+            pattern_table_1: Weak::new(),
+            nametable_0: Weak::new(),
+            nametable_1: Weak::new(),
+            nametable_2: Weak::new(),
+            nametable_3: Weak::new(),
+            palette_ram: [0; 0x0020],
+        }
+    }
     fn sync(&mut self, cycle: usize) {
         // get next vblank
         while cycle >= self.next_vbl {
@@ -192,40 +231,15 @@ fn on_change(var: &mut bool, val: bool) -> Option<bool> {
 }
 
 impl PPU for FastPPU {
-    fn new() -> Self {
-        FastPPU {
-            next_vbl: 241 * SCANLINE + 1,
-            this_vbl: None,
-            next_nmi: None,
-            odd_frame: false,
-            open: 0,
-
-            // registers
-            PPUADDR: 0,
-            PPUMASK: EnumSet::new(),
-
-            // PPUCTRL
-            nametable: Quadrant::TopLeft,
-            vram_direction: Direction::Across,
-            sprite_table: Half::Left,
-            background_table: Half::Left,
-            sprite_size: SpriteSize::Small,
-            nmi_output: false,
-        }
-    }
-
-    // we inline never because this tends to get inlined inside write_addr,
-    // making every instruction slower just to make ppu writes a bit faster
-    #[inline(never)]
     fn write(&mut self, cycle: usize, addr: u16, data: u8) {
         self.open = data;
         match addr & 7 {
             // PPUCTRL
             0 => {
-                self.nametable = Quadrant::from(data & 0b11);
+                self.nametable = Nametable::from(data & 0b11);
                 self.vram_direction = Direction::from(data & 0b00000100 != 0);
-                self.sprite_table = Half::from(data & 0b00001000 != 0);
-                self.background_table = Half::from(data & 0b00010000 != 0);
+                self.sprite_table = PatternTable::from(data & 0b00001000 != 0);
+                self.background_table = PatternTable::from(data & 0b00010000 != 0);
                 self.sprite_size = SpriteSize::from(data & 0b00100000 != 0);
 
                 // NMI
@@ -285,13 +299,14 @@ impl PPU for FastPPU {
             6 => {
                 self.PPUADDR = (self.PPUADDR << 8) | u16::from(data);
             }
+            // PPUDATA
+            7 => {
+                // TODO
+            }
             _ => todo!("write ${:04X} = {:08b}", addr, data),
         }
     }
 
-    // we inline never because this tends to get inlined inside read_addr,
-    // making every instruction slower just to make ppu reads a bit faster
-    #[inline(never)]
     fn read(&mut self, cycle: usize, addr: u16) -> u8 {
         match addr & 7 {
             // PPUSTATUS
@@ -311,7 +326,8 @@ impl PPU for FastPPU {
                     self.next_nmi = None;
                 }
             }
-            _ => todo!("read ${:04X}", addr),
+            // _ => todo!("read ${:04X}", addr),
+            _ => (),
         };
         self.open
     }
@@ -324,5 +340,9 @@ impl PPU for FastPPU {
         } else {
             false
         }
+    }
+
+    fn reset(&mut self) {
+        *self = Self::new();
     }
 }
