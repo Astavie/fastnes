@@ -588,8 +588,8 @@ where
             cpu.PC = u16::from(lo) | u16::from(hi) << 8;
             cpu.hardware_interrupt = false;
 
+            // no polling interrupts
             // immediately execute next instruction
-            cpu.instruction();
         },
         0x08 => |cpu| {
             // PHP
@@ -963,8 +963,8 @@ const fn branch<const MASK: u8, const ZERO: bool>() -> Instruction {
                 cpu.poke_pc();
                 cpu.PC = addr;
             } else {
+                // no polling interrupts
                 // immediately execute next instruction
-                cpu.instruction();
             }
         } else {
             cpu.poll();

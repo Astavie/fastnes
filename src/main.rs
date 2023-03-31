@@ -11,7 +11,7 @@ use std::time::Duration;
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 use sdl2::pixels::Color;
-use sdl2::rect::Rect;
+use sdl2::rect::{Point, Rect};
 use sdl2::render::TextureQuery;
 
 extern crate test;
@@ -206,17 +206,15 @@ fn open_file(
         _ => panic!(),
     };
 
+    let mirroring = if file[6] & 1 == 0 {
+        cartridge::Mirroring::Horizontal
+    } else {
+        cartridge::Mirroring::Vertical
+    };
+
     let cartridge = match file[4] {
-        1 => cartridge::NROM::new_128(
-            cartridge::Mirroring::Horizontal,
-            chr,
-            file[16..chr_start].try_into().unwrap(),
-        ),
-        2 => cartridge::NROM::new_256(
-            cartridge::Mirroring::Horizontal,
-            chr,
-            file[16..chr_start].try_into().unwrap(),
-        ),
+        1 => cartridge::NROM::new_128(mirroring, chr, file[16..chr_start].try_into().unwrap()),
+        2 => cartridge::NROM::new_256(mirroring, chr, file[16..chr_start].try_into().unwrap()),
         _ => panic!(),
     };
 
@@ -240,7 +238,7 @@ fn main() {
     canvas.present();
 
     let (controllers, input) = controller::Controllers::standard();
-    let mut cpu = open_file("test/color_test.nes", controllers, ppu::FastPPU::new());
+    let mut cpu = open_file("rom/dk.nes", controllers, ppu::FastPPU::new());
     cpu.reset();
 
     let mut cycle_target = 0;
@@ -253,6 +251,21 @@ fn main() {
 
     'running: loop {
         canvas.clear();
+
+        let frame = cpu.frame();
+
+        for screen_y in 0..240 {
+            for screen_x in 0..256 {
+                let color = frame[screen_x + screen_y * 256];
+                canvas.set_draw_color(Color::RGB(color.r, color.g, color.b));
+                canvas
+                    .draw_point(Point::new(
+                        screen_x.try_into().unwrap(),
+                        screen_y.try_into().unwrap(),
+                    ))
+                    .unwrap();
+            }
+        }
 
         cycle_target += 29780;
         while cpu.cycle() < cycle_target {

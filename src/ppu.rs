@@ -2,12 +2,21 @@ use enumset::{EnumSet, EnumSetType};
 
 use crate::cpu::DynCartridge;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Color {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+}
+
 pub trait PPU {
     fn write(&mut self, cycle: usize, addr: u16, data: u8, cart: &mut DynCartridge);
     fn read(&mut self, cycle: usize, addr: u16, cart: &DynCartridge) -> u8;
 
     fn nmi(&mut self, cycle: usize) -> bool;
     fn reset(&mut self);
+
+    fn frame(&self, cart: &DynCartridge) -> [Color; 61440]; // 256 * 240 pixels
 }
 
 pub(crate) struct DummyPPU;
@@ -22,6 +31,10 @@ impl PPU for DummyPPU {
         false
     }
     fn reset(&mut self) {}
+
+    fn frame(&self, _cart: &DynCartridge) -> [Color; 61440] {
+        [Color { r: 0, g: 0, b: 0 }; 61440]
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -145,6 +158,8 @@ pub(crate) struct FastPPU {
     // registers
     PPUADDR: u16,
     PPUMASK: EnumSet<PPUMASK>,
+    OAMADDR: u8,
+    PPUSCROLL: u16,
 
     // PPUCTRL
     nametable: Nametable,
@@ -155,7 +170,8 @@ pub(crate) struct FastPPU {
     nmi_output: bool,
 
     // memory
-    palette_ram: [u8; 0x0020],
+    palette_ram: [u8; 32],
+    OAM: [u8; 256],
 }
 
 const SCANLINE: usize = 341;
@@ -173,6 +189,8 @@ impl FastPPU {
             // registers
             PPUADDR: 0,
             PPUMASK: EnumSet::new(),
+            OAMADDR: 0,
+            PPUSCROLL: 0,
 
             // PPUCTRL
             nametable: Nametable::TopLeft,
@@ -183,7 +201,8 @@ impl FastPPU {
             nmi_output: false,
 
             // memory
-            palette_ram: [0; 0x0020],
+            palette_ram: [0; 32],
+            OAM: [0; 256],
         }
     }
     fn sync(&mut self, cycle: usize) {
@@ -284,6 +303,19 @@ impl PPU for FastPPU {
 
                 self.PPUMASK = val;
             }
+            // OAMADDR
+            3 => {
+                self.OAMADDR = data;
+            }
+            // OAMDATA
+            4 => {
+                self.OAM[usize::from(self.OAMADDR)] = data;
+                self.OAMADDR = self.OAMADDR.wrapping_add(1);
+            }
+            // PPUSCROLL
+            5 => {
+                self.PPUSCROLL = (self.PPUSCROLL << 8) | u16::from(data);
+            }
             // PPUADDR
             6 => {
                 self.PPUADDR = ((self.PPUADDR << 8) | u16::from(data)) & 0x3FFF;
@@ -294,13 +326,12 @@ impl PPU for FastPPU {
                     // palette ram
                     self.palette_ram[usize::from(self.PPUADDR as u8)] = data;
                 } else if let Some(cart) = cart.as_mut() {
-                    match self.PPUADDR & 0x3000 {
+                    match self.PPUADDR & 0x2000 {
                         // pattern table
-                        0x0000 | 0x1000 => cart.write_chr(self.PPUADDR, data),
+                        0x0000 => cart.write_chr(self.PPUADDR, data),
 
                         // nametable
                         0x2000 => cart.write_nametable(self.PPUADDR, data),
-                        0x3000 => cart.write_nametable(self.PPUADDR - 0x1000, data),
 
                         _ => unreachable!(),
                     }
@@ -309,7 +340,7 @@ impl PPU for FastPPU {
                 // increment PPUADDR
                 self.vram_direction.increment(&mut self.PPUADDR);
             }
-            _ => todo!("write ${:04X} = {:08b}", addr, data),
+            _ => (),
         }
     }
 
@@ -332,8 +363,7 @@ impl PPU for FastPPU {
                     self.next_nmi = None;
                 }
             }
-            // _ => todo!("read ${:04X}", addr),
-            _ => (),
+            _ => todo!("read ${:04X}", addr),
         };
         self.open
     }
@@ -351,4 +381,311 @@ impl PPU for FastPPU {
     fn reset(&mut self) {
         *self = Self::new();
     }
+
+    fn frame(&self, cart: &DynCartridge) -> [Color; 61440] {
+        let mut frame = [Color { r: 0, g: 0, b: 0 }; 61440];
+
+        if let Some(cart) = cart {
+            let nametable = self.nametable.addr();
+            let bg_table = self.background_table.addr();
+            let scroll_x = self.PPUSCROLL >> 8;
+            let scroll_y = self.PPUSCROLL & 0xFF;
+
+            for screen_y in 0..240 {
+                for screen_x in 0..256 {
+                    let mut x = screen_x + scroll_x;
+                    let mut y = screen_y + scroll_y;
+                    let mut nametable = nametable;
+
+                    if x >= 256 {
+                        // nametable to the right
+                        x -= 256;
+                        nametable += 0x400;
+                    }
+
+                    if y >= 240 {
+                        // nametable to the bottom
+                        y -= 240;
+                        nametable += 0x800;
+                    }
+
+                    let tile_addr = nametable + (x / 8) + (y / 8) * 32;
+                    let attribute_addr = nametable + 0x3C0 + (x / 32) + (y / 32) * 8;
+
+                    let tile = cart.read_nametable(tile_addr);
+                    let attribute = cart.read_nametable(attribute_addr);
+
+                    let palette = match (x & 16 == 0, y & 16 == 0) {
+                        (true, true) => (attribute >> 0) & 0b11,   // top left
+                        (false, true) => (attribute >> 2) & 0b11,  // top right
+                        (true, false) => (attribute >> 4) & 0b11,  // bottom left
+                        (false, false) => (attribute >> 6) & 0b11, // bottom right
+                    };
+
+                    let tile_x = 7 - (x & 7);
+                    let tile_y = y & 7;
+
+                    let pattern_addr = bg_table + u16::from(tile) * 16 + tile_y;
+
+                    let color_lo = (cart.read_chr(pattern_addr) >> tile_x) & 1;
+                    let color_hi = (cart.read_chr(pattern_addr + 8) >> tile_x) & 1;
+                    let color_indx = color_lo | (color_hi << 1);
+
+                    let color = if color_indx == 0 {
+                        self.palette_ram[0]
+                    } else {
+                        self.palette_ram[usize::from(palette * 4 + color_indx)]
+                    };
+
+                    frame[usize::from(screen_x + screen_y * 256)] =
+                        PALETTE[usize::from(color & 0x3F)];
+                }
+            }
+        }
+
+        frame
+    }
 }
+
+const PALETTE: [Color; 64] = [
+    Color {
+        r: 84,
+        g: 84,
+        b: 84,
+    },
+    Color {
+        r: 0,
+        g: 30,
+        b: 116,
+    },
+    Color {
+        r: 8,
+        g: 16,
+        b: 144,
+    },
+    Color {
+        r: 48,
+        g: 0,
+        b: 136,
+    },
+    Color {
+        r: 68,
+        g: 0,
+        b: 100,
+    },
+    Color { r: 92, g: 0, b: 48 },
+    Color { r: 84, g: 4, b: 0 },
+    Color { r: 60, g: 24, b: 0 },
+    Color { r: 32, g: 42, b: 0 },
+    Color { r: 8, g: 58, b: 0 },
+    Color { r: 0, g: 64, b: 0 },
+    Color { r: 0, g: 60, b: 0 },
+    Color { r: 0, g: 50, b: 60 },
+    Color { r: 0, g: 0, b: 0 },
+    Color { r: 0, g: 0, b: 0 },
+    Color { r: 0, g: 0, b: 0 },
+    Color {
+        r: 152,
+        g: 150,
+        b: 152,
+    },
+    Color {
+        r: 8,
+        g: 76,
+        b: 196,
+    },
+    Color {
+        r: 48,
+        g: 50,
+        b: 236,
+    },
+    Color {
+        r: 92,
+        g: 30,
+        b: 228,
+    },
+    Color {
+        r: 136,
+        g: 20,
+        b: 176,
+    },
+    Color {
+        r: 160,
+        g: 20,
+        b: 100,
+    },
+    Color {
+        r: 152,
+        g: 34,
+        b: 32,
+    },
+    Color {
+        r: 120,
+        g: 60,
+        b: 0,
+    },
+    Color { r: 84, g: 90, b: 0 },
+    Color {
+        r: 40,
+        g: 114,
+        b: 0,
+    },
+    Color { r: 8, g: 124, b: 0 },
+    Color {
+        r: 0,
+        g: 118,
+        b: 40,
+    },
+    Color {
+        r: 0,
+        g: 102,
+        b: 120,
+    },
+    Color { r: 0, g: 0, b: 0 },
+    Color { r: 0, g: 0, b: 0 },
+    Color { r: 0, g: 0, b: 0 },
+    Color {
+        r: 236,
+        g: 238,
+        b: 236,
+    },
+    Color {
+        r: 76,
+        g: 154,
+        b: 236,
+    },
+    Color {
+        r: 120,
+        g: 124,
+        b: 236,
+    },
+    Color {
+        r: 176,
+        g: 98,
+        b: 236,
+    },
+    Color {
+        r: 228,
+        g: 84,
+        b: 236,
+    },
+    Color {
+        r: 236,
+        g: 88,
+        b: 180,
+    },
+    Color {
+        r: 236,
+        g: 106,
+        b: 100,
+    },
+    Color {
+        r: 212,
+        g: 136,
+        b: 32,
+    },
+    Color {
+        r: 160,
+        g: 170,
+        b: 0,
+    },
+    Color {
+        r: 116,
+        g: 196,
+        b: 0,
+    },
+    Color {
+        r: 76,
+        g: 208,
+        b: 32,
+    },
+    Color {
+        r: 56,
+        g: 204,
+        b: 108,
+    },
+    Color {
+        r: 56,
+        g: 180,
+        b: 204,
+    },
+    Color {
+        r: 60,
+        g: 60,
+        b: 60,
+    },
+    Color { r: 0, g: 0, b: 0 },
+    Color { r: 0, g: 0, b: 0 },
+    Color {
+        r: 236,
+        g: 238,
+        b: 236,
+    },
+    Color {
+        r: 168,
+        g: 204,
+        b: 236,
+    },
+    Color {
+        r: 188,
+        g: 188,
+        b: 236,
+    },
+    Color {
+        r: 212,
+        g: 178,
+        b: 236,
+    },
+    Color {
+        r: 236,
+        g: 174,
+        b: 236,
+    },
+    Color {
+        r: 236,
+        g: 174,
+        b: 212,
+    },
+    Color {
+        r: 236,
+        g: 180,
+        b: 176,
+    },
+    Color {
+        r: 228,
+        g: 196,
+        b: 144,
+    },
+    Color {
+        r: 204,
+        g: 210,
+        b: 120,
+    },
+    Color {
+        r: 180,
+        g: 222,
+        b: 120,
+    },
+    Color {
+        r: 168,
+        g: 226,
+        b: 144,
+    },
+    Color {
+        r: 152,
+        g: 226,
+        b: 180,
+    },
+    Color {
+        r: 160,
+        g: 214,
+        b: 228,
+    },
+    Color {
+        r: 160,
+        g: 162,
+        b: 160,
+    },
+    Color { r: 0, g: 0, b: 0 },
+    Color { r: 0, g: 0, b: 0 },
+];

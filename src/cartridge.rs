@@ -22,20 +22,20 @@ pub enum Mirroring {
 
 pub struct MirroredNametable {
     mirroring: Mirroring,
-    a: [u8; 0x0200],
-    b: [u8; 0x0200],
+    a: [u8; 0x0400],
+    b: [u8; 0x0400],
 }
 
 impl MirroredNametable {
     pub fn new(mirroring: Mirroring) -> Self {
         Self {
             mirroring,
-            a: [0; 0x0200],
-            b: [0; 0x0200],
+            a: [0; 0x0400],
+            b: [0; 0x0400],
         }
     }
     pub fn read(&self, addr: u16) -> u8 {
-        let spot = usize::from(addr & 0x1FF);
+        let spot = usize::from(addr & 0x3FF);
         match (self.mirroring, addr & 0xC00) {
             (Mirroring::SingleA, _) => self.a[spot],
             (Mirroring::SingleB, _) => self.b[spot],
@@ -51,7 +51,7 @@ impl MirroredNametable {
         }
     }
     pub fn write(&mut self, addr: u16, data: u8) {
-        let spot = usize::from(addr & 0x1FF);
+        let spot = usize::from(addr & 0x3FF);
         match (self.mirroring, addr & 0xC00) {
             (Mirroring::SingleA, _) => self.a[spot] = data,
             (Mirroring::SingleB, _) => self.b[spot] = data,
@@ -87,16 +87,16 @@ impl NROM {
         Self {
             nametable: MirroredNametable::new(mirroring),
             ram: [0; 0x2000],
-            chr,
             rom,
+            chr,
         }
     }
     pub fn new_128(mirroring: Mirroring, chr: [u8; 0x2000], rom: [u8; 0x4000]) -> Self {
         Self {
             nametable: MirroredNametable::new(mirroring),
             ram: [0; 0x2000],
-            chr,
             rom: concat(rom, rom),
+            chr,
         }
     }
 }

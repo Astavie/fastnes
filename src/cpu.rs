@@ -2,7 +2,7 @@ use crate::{
     cartridge::Cartridge,
     controller::Controllers,
     instruction::{instructions, Instructions},
-    ppu::PPU,
+    ppu::{Color, PPU},
 };
 
 pub(crate) type DynCartridge = Option<Box<dyn Cartridge>>;
@@ -91,6 +91,9 @@ impl CPU {
     }
     pub fn cycle(&self) -> usize {
         self.ppu_cycle / 3
+    }
+    pub fn frame(&self) -> [Color; 61440] {
+        self.ppu.frame(&self.cart)
     }
 
     // HELPER FUNCTIONS
