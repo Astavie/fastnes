@@ -9,7 +9,7 @@ use std::fs::read;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
@@ -95,6 +95,28 @@ mod tests {
             assert_eq!(cpu.cycle(), END_CYCLE);
             assert_eq!(cpu.PC, END_ADDR);
         });
+    }
+
+    #[bench]
+    fn dk(b: &mut Bencher) {
+        let mut dk = open_file(
+            "rom/dk.nes",
+            controller::Controllers::standard().0,
+            ppu::FastPPU::new(),
+        );
+
+        // run dk for 1000 frames
+        b.iter(|| {
+            dk.reset();
+
+            const FRAME: usize = 29780;
+            const FRAMES: usize = 1000;
+            const TARGET: usize = FRAME * FRAMES + FRAMES / 2;
+
+            while dk.cycle() < TARGET {
+                dk.instruction();
+            }
+        })
     }
 
     fn test_file(file: &str) {
@@ -224,6 +246,35 @@ fn open_file(
 }
 
 fn main() {
+    let (tx_lock, rx_lock) = mpsc::channel();
+    let (tx_frame, rx_frame) = mpsc::channel();
+
+    thread::spawn(move || {
+        let (controllers, input) = controller::Controllers::standard();
+        let mut cpu = open_file("rom/dk.nes", controllers, ppu::FastPPU::new());
+        cpu.reset();
+
+        let mut cycle_target = 0;
+        loop {
+            const FRAMES: usize = 1000;
+            cycle_target += 29780 * FRAMES;
+
+            let start = Instant::now();
+            while cpu.cycle() < cycle_target {
+                cpu.instruction();
+            }
+            let duration = start.elapsed();
+
+            println!("{} fps", FRAMES as f64 / duration.as_secs_f64());
+
+            if let Ok(_) = rx_lock.try_recv() {
+                tx_frame
+                    .send((Box::new(cpu.frame()), input.clone()))
+                    .unwrap();
+            }
+        }
+    });
+
     let sdl_context = sdl2::init().unwrap();
     let video_subsystem = sdl_context.video().unwrap();
 
@@ -238,29 +289,6 @@ fn main() {
     canvas.set_draw_color(Color::RGB(0, 255, 255));
     canvas.clear();
     canvas.present();
-
-    let (tx_lock, rx_lock) = mpsc::channel();
-    let (tx_frame, rx_frame) = mpsc::channel();
-
-    thread::spawn(move || {
-        let (controllers, input) = controller::Controllers::standard();
-        let mut cpu = open_file("rom/dk.nes", controllers, ppu::FastPPU::new());
-        cpu.reset();
-
-        let mut cycle_target = 0;
-        loop {
-            cycle_target += 297800;
-            while cpu.cycle() < cycle_target {
-                cpu.instruction();
-            }
-
-            if let Ok(_) = rx_lock.try_recv() {
-                tx_frame
-                    .send((Box::new(cpu.frame()), input.clone()))
-                    .unwrap();
-            }
-        }
-    });
 
     let mut event_pump = sdl_context.event_pump().unwrap();
 
