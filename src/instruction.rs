@@ -1,4 +1,4 @@
-use crate::{cpu::CPU, ppu::PPU};
+use crate::cpu::CPU;
 use repeated::repeated;
 use std::{fmt::Debug, rc::Rc};
 
@@ -54,6 +54,18 @@ impl Addressable for u16 {
     }
     fn write(&self, cpu: &mut CPU, data: u8) {
         cpu.write_addr(*self, data)
+    }
+}
+
+impl Addressable for u8 {
+    fn poke(&self, cpu: &mut CPU) {
+        cpu.read_zeropage(*self);
+    }
+    fn read(&self, cpu: &mut CPU) -> u8 {
+        cpu.read_zeropage(*self)
+    }
+    fn write(&self, cpu: &mut CPU, data: u8) {
+        cpu.write_zeropage(*self, data)
     }
 }
 
@@ -782,32 +794,32 @@ impl Mode {
                 Micro::instruction::<u16, M>()(cpu, addr);
             },
             Mode::ZeroPage => |cpu| {
-                let addr = u16::from(cpu.read_pc());
+                let addr = cpu.read_pc();
 
                 cpu.poll();
 
-                Micro::instruction::<u16, M>()(cpu, addr);
+                Micro::instruction::<u8, M>()(cpu, addr);
             },
             Mode::ZeroPageIndexed(i) => match i {
                 Index::X => |cpu| {
                     let ptr = cpu.read_pc();
                     cpu.read_addr(u16::from(ptr));
 
-                    let addr = u16::from(ptr.wrapping_add(cpu.X));
+                    let addr = ptr.wrapping_add(cpu.X);
 
                     cpu.poll();
 
-                    Micro::instruction::<u16, M>()(cpu, addr);
+                    Micro::instruction::<u8, M>()(cpu, addr);
                 },
                 Index::Y => |cpu| {
                     let ptr = cpu.read_pc();
                     cpu.read_addr(u16::from(ptr));
 
-                    let addr = u16::from(ptr.wrapping_add(cpu.Y));
+                    let addr = ptr.wrapping_add(cpu.Y);
 
                     cpu.poll();
 
-                    Micro::instruction::<u16, M>()(cpu, addr);
+                    Micro::instruction::<u8, M>()(cpu, addr);
                 },
             },
             Mode::AbsoluteIndexed(i) => match i {

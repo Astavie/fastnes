@@ -6,11 +6,11 @@ pub struct Controllers {
 }
 
 impl Controllers {
-    pub(crate) fn read_left(&mut self) -> u8 {
-        self.left.read()
+    pub(crate) fn read_left(&mut self, open: u8) -> u8 {
+        self.left.read(open)
     }
-    pub(crate) fn read_right(&mut self) -> u8 {
-        self.right.read()
+    pub(crate) fn read_right(&mut self, open: u8) -> u8 {
+        self.right.read(open)
     }
     pub(crate) fn write(&mut self, data: u8) {
         self.left.write(data);
@@ -40,7 +40,7 @@ impl Controllers {
 }
 
 trait Controller {
-    fn read(&mut self) -> u8;
+    fn read(&mut self, open: u8) -> u8;
     fn write(&mut self, data: u8);
 }
 
@@ -52,19 +52,19 @@ struct StandardController {
 struct Unconnected;
 
 impl Controller for Unconnected {
-    fn read(&mut self) -> u8 {
-        0 // TODO: Open bus
+    fn read(&mut self, open: u8) -> u8 {
+        open
     }
-    fn write(&mut self, data: u8) {}
+    fn write(&mut self, _data: u8) {}
 }
 
 impl Controller for StandardController {
-    fn read(&mut self) -> u8 {
+    fn read(&mut self, open: u8) -> u8 {
         let shift = self.shift.unwrap_or(0);
         let data = (self.input.get() >> shift) & 1;
-        println!("{:08b} {:08b}", data, self.input.get());
+        // println!("{:08b} {:08b}", data, self.input.get());
         self.shift = self.shift.map(|s| s + 1);
-        data
+        (open & 0b11111110) | data
     }
     fn write(&mut self, data: u8) {
         if data & 1 == 1 {

@@ -103,8 +103,8 @@ impl CPU {
     #[inline(never)]
     fn read_apu(&mut self, addr: u16) -> u8 {
         match addr {
-            0x4016 => self.controllers.read_left(),
-            0x4017 => self.controllers.read_right(),
+            0x4016 => self.controllers.read_left(self.open),
+            0x4017 => self.controllers.read_right(self.open),
             _ => {
                 // TODO: APU
                 // todo!("read ${:04X}", addr),
@@ -194,6 +194,15 @@ impl CPU {
         } else {
             self.read_addr(addr);
         }
+    }
+    pub(crate) fn read_zeropage(&mut self, addr: u8) -> u8 {
+        self.ppu_cycle += 3;
+        self.ram_internal[usize::from(addr)]
+    }
+
+    pub(crate) fn write_zeropage(&mut self, addr: u8, data: u8) {
+        self.ppu_cycle += 3;
+        self.ram_internal[usize::from(addr)] = data;
     }
     pub(crate) fn read_addr(&mut self, addr: u16) -> u8 {
         self.ppu_cycle += 3;
