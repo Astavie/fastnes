@@ -6,13 +6,15 @@
 #![feature(is_some_and)]
 
 use std::fs::read;
+use std::sync::atomic::Ordering;
+use std::sync::mpsc;
+use std::thread;
 use std::time::Duration;
 
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 use sdl2::pixels::Color;
-use sdl2::rect::{Point, Rect};
-use sdl2::render::TextureQuery;
+use sdl2::rect::Point;
 
 extern crate test;
 
@@ -237,22 +239,36 @@ fn main() {
     canvas.clear();
     canvas.present();
 
-    let (controllers, input) = controller::Controllers::standard();
-    let mut cpu = open_file("rom/dk.nes", controllers, ppu::FastPPU::new());
-    cpu.reset();
+    let (tx_lock, rx_lock) = mpsc::channel();
+    let (tx_frame, rx_frame) = mpsc::channel();
 
-    let mut cycle_target = 0;
+    thread::spawn(move || {
+        let (controllers, input) = controller::Controllers::standard();
+        let mut cpu = open_file("rom/dk.nes", controllers, ppu::FastPPU::new());
+        cpu.reset();
+
+        let mut cycle_target = 0;
+        loop {
+            cycle_target += 297800;
+            while cpu.cycle() < cycle_target {
+                cpu.instruction();
+            }
+
+            if let Ok(_) = rx_lock.try_recv() {
+                tx_frame
+                    .send((Box::new(cpu.frame()), input.clone()))
+                    .unwrap();
+            }
+        }
+    });
+
     let mut event_pump = sdl_context.event_pump().unwrap();
-
-    let ttf_context = sdl2::ttf::init().unwrap();
-    let font = ttf_context.load_font("test/pixeloid.ttf", 14).unwrap();
-
-    let texture_creator = canvas.texture_creator();
 
     'running: loop {
         canvas.clear();
 
-        let frame = cpu.frame();
+        tx_lock.send(()).unwrap();
+        let (frame, input) = rx_frame.recv().unwrap();
 
         for screen_y in 0..240 {
             for screen_x in 0..256 {
@@ -267,25 +283,7 @@ fn main() {
             }
         }
 
-        cycle_target += 29780;
-        while cpu.cycle() < cycle_target {
-            cpu.instruction();
-        }
-
-        let op = cpu.read(cpu.PC);
-        let surface = font
-            .render(format!("PC: ${:04X} OP:{:02X}", cpu.PC, op).as_str())
-            .blended(Color::RGBA(255, 0, 0, 255))
-            .unwrap();
-        let texture = texture_creator
-            .create_texture_from_surface(&surface)
-            .unwrap();
-
-        let TextureQuery { width, height, .. } = texture.query();
-
-        canvas
-            .copy(&texture, None, Some(Rect::new(0, 0, width, height)))
-            .unwrap();
+        let val = input.load(Ordering::Relaxed);
 
         for event in event_pump.poll_iter() {
             match event {
@@ -294,97 +292,97 @@ fn main() {
                     keycode: Some(Keycode::Z),
                     ..
                 } => {
-                    input.set(input.get() | 0b00000001);
+                    input.store(val | 0b00000001, Ordering::Relaxed);
                 }
                 Event::KeyDown {
                     keycode: Some(Keycode::X),
                     ..
                 } => {
-                    input.set(input.get() | 0b00000010);
+                    input.store(val | 0b00000010, Ordering::Relaxed);
                 }
                 Event::KeyDown {
                     keycode: Some(Keycode::RShift),
                     ..
                 } => {
-                    input.set(input.get() | 0b00000100);
+                    input.store(val | 0b00000100, Ordering::Relaxed);
                 }
                 Event::KeyDown {
                     keycode: Some(Keycode::Return),
                     ..
                 } => {
-                    input.set(input.get() | 0b00001000);
+                    input.store(val | 0b00001000, Ordering::Relaxed);
                 }
                 Event::KeyDown {
                     keycode: Some(Keycode::Up),
                     ..
                 } => {
-                    input.set(input.get() | 0b00010000);
+                    input.store(val | 0b00010000, Ordering::Relaxed);
                 }
                 Event::KeyDown {
                     keycode: Some(Keycode::Down),
                     ..
                 } => {
-                    input.set(input.get() | 0b00100000);
+                    input.store(val | 0b00100000, Ordering::Relaxed);
                 }
                 Event::KeyDown {
                     keycode: Some(Keycode::Left),
                     ..
                 } => {
-                    input.set(input.get() | 0b01000000);
+                    input.store(val | 0b01000000, Ordering::Relaxed);
                 }
                 Event::KeyDown {
                     keycode: Some(Keycode::Right),
                     ..
                 } => {
-                    input.set(input.get() | 0b10000000);
+                    input.store(val | 0b10000000, Ordering::Relaxed);
                 }
                 Event::KeyUp {
                     keycode: Some(Keycode::Z),
                     ..
                 } => {
-                    input.set(input.get() & 0b11111110);
+                    input.store(val & 0b11111110, Ordering::Relaxed);
                 }
                 Event::KeyUp {
                     keycode: Some(Keycode::X),
                     ..
                 } => {
-                    input.set(input.get() & 0b11111101);
+                    input.store(val & 0b11111101, Ordering::Relaxed);
                 }
                 Event::KeyUp {
                     keycode: Some(Keycode::RShift),
                     ..
                 } => {
-                    input.set(input.get() & 0b11111011);
+                    input.store(val & 0b11111011, Ordering::Relaxed);
                 }
                 Event::KeyUp {
                     keycode: Some(Keycode::Return),
                     ..
                 } => {
-                    input.set(input.get() & 0b11110111);
+                    input.store(val & 0b11110111, Ordering::Relaxed);
                 }
                 Event::KeyUp {
                     keycode: Some(Keycode::Up),
                     ..
                 } => {
-                    input.set(input.get() & 0b11101111);
+                    input.store(val & 0b11101111, Ordering::Relaxed);
                 }
                 Event::KeyUp {
                     keycode: Some(Keycode::Down),
                     ..
                 } => {
-                    input.set(input.get() & 0b11011111);
+                    input.store(val & 0b11011111, Ordering::Relaxed);
                 }
                 Event::KeyUp {
                     keycode: Some(Keycode::Left),
                     ..
                 } => {
-                    input.set(input.get() & 0b10111111);
+                    input.store(val & 0b10111111, Ordering::Relaxed);
                 }
                 Event::KeyUp {
                     keycode: Some(Keycode::Right),
                     ..
                 } => {
-                    input.set(input.get() & 0b01111111);
+                    input.store(val & 0b01111111, Ordering::Relaxed);
                 }
                 _ => (),
             }

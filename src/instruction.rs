@@ -1,9 +1,9 @@
 use crate::cpu::CPU;
 use repeated::repeated;
-use std::{fmt::Debug, rc::Rc};
+use std::{fmt::Debug, sync::Arc};
 
 pub type Instruction = fn(&mut CPU);
-pub type Instructions = Rc<[Instruction; 256]>;
+pub type Instructions = Arc<[Instruction; 256]>;
 
 trait Addressable {
     fn poke(&self, cpu: &mut CPU);
@@ -986,7 +986,7 @@ const fn branch<const MASK: u8, const ZERO: bool>() -> Instruction {
 }
 
 pub fn instructions() -> Instructions {
-    Rc::new(repeated!(
+    Arc::new(repeated!(
         %%s prelude [ prelude s%%
         for op in [0;255] {
             instruction::<%%op%%>(),

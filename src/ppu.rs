@@ -1,6 +1,6 @@
 use enumset::{EnumSet, EnumSetType};
 
-use crate::cpu::DynCartridge;
+use crate::{cartridge::Cartridge, cpu::DynCartridge};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Color {
@@ -227,6 +227,150 @@ impl FastPPU {
             None
         };
     }
+
+    fn draw_sprites(&self, background: bool, cart: &Box<dyn Cartridge>, frame: &mut [Color]) {
+        for sprite in 0..64 {
+            let data = &self.OAM[sprite * 4..];
+
+            // ignore other sprites
+            if (data[2] & 0b00100000 == 0) == background {
+                continue;
+            }
+
+            // ignore below the screen
+            if data[0] >= 0xEF {
+                continue;
+            }
+
+            let tile = data[1];
+            let pattern_addr = match self.sprite_size {
+                SpriteSize::Small => self.sprite_table.addr() + u16::from(tile) * 16,
+                SpriteSize::Tall => {
+                    (u16::from(tile & 1) * 0x1000) + u16::from(tile & 0b11111110) * 16
+                }
+            };
+
+            let height = match self.sprite_size {
+                SpriteSize::Small => 8,
+                SpriteSize::Tall => 16,
+            };
+
+            let palette = data[2] & 0b11;
+            let flip_hor = data[2] & 0b01000000 != 0;
+            let flip_ver = data[2] & 0b10000000 != 0;
+
+            let x = data[3];
+            let y = data[0] + 1;
+
+            for sprite_y in 0..height {
+                for sprite_x in 0..8 {
+                    let screen_x = u16::from(x)
+                        + if flip_hor {
+                            u16::from(7 - u8::from(sprite_x))
+                        } else {
+                            u16::from(sprite_x)
+                        };
+
+                    let screen_y = u16::from(y)
+                        + if flip_ver {
+                            u16::from(height - 1 - u8::from(sprite_y))
+                        } else {
+                            u16::from(sprite_y)
+                        };
+
+                    if screen_x < 8 && !self.PPUMASK.contains(PPUMASK::ShowSpritesLeft) {
+                        continue;
+                    }
+
+                    if screen_x >= 256 || screen_y >= 240 {
+                        continue;
+                    }
+
+                    let pattern_addr = if sprite_y >= 8 {
+                        pattern_addr + u16::from(sprite_y) + 8
+                    } else {
+                        pattern_addr + u16::from(sprite_y)
+                    };
+
+                    let color_lo = (cart.read_chr(pattern_addr) >> (7 - sprite_x)) & 1;
+                    let color_hi = (cart.read_chr(pattern_addr + 8) >> (7 - sprite_x)) & 1;
+                    let color_indx = color_lo | (color_hi << 1);
+
+                    let color = if color_indx == 0 {
+                        continue;
+                    } else {
+                        self.palette_ram[usize::from(0x10 + palette * 4 + color_indx)]
+                    };
+
+                    frame[usize::from(screen_x + screen_y * 256)] =
+                        PALETTE[usize::from(color & 0x3F)];
+                }
+            }
+        }
+    }
+
+    fn draw_tiles(&self, cart: &Box<dyn Cartridge>, frame: &mut [Color]) {
+        let nametable = self.nametable.addr();
+        let scroll_x = self.PPUSCROLL >> 8;
+        let scroll_y = self.PPUSCROLL & 0xFF;
+
+        let x_start = if self.PPUMASK.contains(PPUMASK::ShowBackgroundLeft) {
+            0
+        } else {
+            8
+        };
+
+        // background
+        for screen_y in 0..240 {
+            for screen_x in x_start..256 {
+                let mut x = screen_x + scroll_x;
+                let mut y = screen_y + scroll_y;
+                let mut nametable = nametable;
+
+                if x >= 256 {
+                    // nametable to the right
+                    x -= 256;
+                    nametable += 0x400;
+                }
+
+                if y >= 240 {
+                    // nametable to the bottom
+                    y -= 240;
+                    nametable += 0x800;
+                }
+
+                let tile_addr = nametable + (x / 8) + (y / 8) * 32;
+                let attribute_addr = nametable + 0x3C0 + (x / 32) + (y / 32) * 8;
+
+                let tile = cart.read_nametable(tile_addr);
+                let attribute = cart.read_nametable(attribute_addr);
+
+                let palette = match (x & 16 == 0, y & 16 == 0) {
+                    (true, true) => (attribute >> 0) & 0b11,   // top left
+                    (false, true) => (attribute >> 2) & 0b11,  // top right
+                    (true, false) => (attribute >> 4) & 0b11,  // bottom left
+                    (false, false) => (attribute >> 6) & 0b11, // bottom right
+                };
+
+                let tile_x = x & 7;
+                let tile_y = y & 7;
+
+                let pattern_addr = self.background_table.addr() + u16::from(tile) * 16 + tile_y;
+
+                let color_lo = (cart.read_chr(pattern_addr) >> (7 - tile_x)) & 1;
+                let color_hi = (cart.read_chr(pattern_addr + 8) >> (7 - tile_x)) & 1;
+                let color_indx = color_lo | (color_hi << 1);
+
+                let color = if color_indx == 0 {
+                    continue;
+                } else {
+                    self.palette_ram[usize::from(palette * 4 + color_indx)]
+                };
+
+                frame[usize::from(screen_x + screen_y * 256)] = PALETTE[usize::from(color & 0x3F)];
+            }
+        }
+    }
 }
 
 fn on_change(var: &mut bool, val: bool) -> Option<bool> {
@@ -325,6 +469,19 @@ impl PPU for FastPPU {
                 if self.PPUADDR >= 0x3F00 && self.PPUADDR < 0x3F20 {
                     // palette ram
                     self.palette_ram[usize::from(self.PPUADDR as u8)] = data;
+
+                    // FIXME: hacky way to implement mirrors
+                    if self.PPUADDR as u8 >= 0x10 {
+                        self.palette_ram[0x00] = self.palette_ram[0x10];
+                        self.palette_ram[0x04] = self.palette_ram[0x14];
+                        self.palette_ram[0x08] = self.palette_ram[0x18];
+                        self.palette_ram[0x0C] = self.palette_ram[0x1C];
+                    } else {
+                        self.palette_ram[0x10] = self.palette_ram[0x00];
+                        self.palette_ram[0x14] = self.palette_ram[0x04];
+                        self.palette_ram[0x18] = self.palette_ram[0x08];
+                        self.palette_ram[0x1C] = self.palette_ram[0x0C];
+                    }
                 } else if let Some(cart) = cart.as_mut() {
                     match self.PPUADDR & 0x2000 {
                         // pattern table
@@ -383,64 +540,12 @@ impl PPU for FastPPU {
     }
 
     fn frame(&self, cart: &DynCartridge) -> [Color; 61440] {
-        let mut frame = [Color { r: 0, g: 0, b: 0 }; 61440];
+        let mut frame = [PALETTE[usize::from(self.palette_ram[0])]; 61440];
 
         if let Some(cart) = cart {
-            let nametable = self.nametable.addr();
-            let bg_table = self.background_table.addr();
-            let scroll_x = self.PPUSCROLL >> 8;
-            let scroll_y = self.PPUSCROLL & 0xFF;
-
-            for screen_y in 0..240 {
-                for screen_x in 0..256 {
-                    let mut x = screen_x + scroll_x;
-                    let mut y = screen_y + scroll_y;
-                    let mut nametable = nametable;
-
-                    if x >= 256 {
-                        // nametable to the right
-                        x -= 256;
-                        nametable += 0x400;
-                    }
-
-                    if y >= 240 {
-                        // nametable to the bottom
-                        y -= 240;
-                        nametable += 0x800;
-                    }
-
-                    let tile_addr = nametable + (x / 8) + (y / 8) * 32;
-                    let attribute_addr = nametable + 0x3C0 + (x / 32) + (y / 32) * 8;
-
-                    let tile = cart.read_nametable(tile_addr);
-                    let attribute = cart.read_nametable(attribute_addr);
-
-                    let palette = match (x & 16 == 0, y & 16 == 0) {
-                        (true, true) => (attribute >> 0) & 0b11,   // top left
-                        (false, true) => (attribute >> 2) & 0b11,  // top right
-                        (true, false) => (attribute >> 4) & 0b11,  // bottom left
-                        (false, false) => (attribute >> 6) & 0b11, // bottom right
-                    };
-
-                    let tile_x = 7 - (x & 7);
-                    let tile_y = y & 7;
-
-                    let pattern_addr = bg_table + u16::from(tile) * 16 + tile_y;
-
-                    let color_lo = (cart.read_chr(pattern_addr) >> tile_x) & 1;
-                    let color_hi = (cart.read_chr(pattern_addr + 8) >> tile_x) & 1;
-                    let color_indx = color_lo | (color_hi << 1);
-
-                    let color = if color_indx == 0 {
-                        self.palette_ram[0]
-                    } else {
-                        self.palette_ram[usize::from(palette * 4 + color_indx)]
-                    };
-
-                    frame[usize::from(screen_x + screen_y * 256)] =
-                        PALETTE[usize::from(color & 0x3F)];
-                }
-            }
+            self.draw_sprites(true, cart, &mut frame);
+            self.draw_tiles(cart, &mut frame);
+            self.draw_sprites(false, cart, &mut frame);
         }
 
         frame

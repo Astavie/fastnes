@@ -1,4 +1,7 @@
-use std::{cell::Cell, rc::Rc};
+use std::sync::{
+    atomic::{AtomicU8, Ordering},
+    Arc,
+};
 
 pub struct Controllers {
     left: Box<dyn Controller>,
@@ -16,10 +19,10 @@ impl Controllers {
         self.left.write(data);
         self.right.write(data);
     }
-    pub fn standard() -> (Controllers, Rc<Cell<u8>>) {
-        let input = Rc::new(Cell::new(0));
+    pub fn standard() -> (Controllers, Arc<AtomicU8>) {
+        let input = Arc::new(AtomicU8::new(0));
         let left = StandardController {
-            input: Rc::clone(&input),
+            input: Arc::clone(&input),
             shift: None,
         };
         let right = Unconnected;
@@ -45,7 +48,7 @@ trait Controller {
 }
 
 struct StandardController {
-    pub input: Rc<Cell<u8>>,
+    pub input: Arc<AtomicU8>,
     shift: Option<u8>,
 }
 
@@ -61,7 +64,7 @@ impl Controller for Unconnected {
 impl Controller for StandardController {
     fn read(&mut self, open: u8) -> u8 {
         let shift = self.shift.unwrap_or(0);
-        let data = (self.input.get() >> shift) & 1;
+        let data = (self.input.load(Ordering::Relaxed) >> shift) & 1;
         // println!("{:08b} {:08b}", data, self.input.get());
         self.shift = self.shift.map(|s| s + 1);
         (open & 0b11111110) | data

@@ -118,6 +118,31 @@ impl CPU {
     #[inline(never)]
     fn write_apu(&mut self, addr: u16, data: u8) {
         match addr {
+            // OAMDMA
+            0x4014 => {
+                // FIXME:
+                // this does not accurately emulate writing to OAMDMA with Read-Modify-Write instructions
+                // these instructions write twice, and OAMDMA can only start on a read cycle
+                // so the first write to OAMDMA should be ignored
+
+                // halted cycle
+                self.read_addr(self.PC);
+
+                // align cycle
+                if self.cycle() & 1 == 0 {
+                    self.read_addr(self.PC);
+                }
+
+                // DMA
+                let high = u16::from(data) << 8;
+                for low in 0..=255 {
+                    // get cycle
+                    let data = self.read_addr(high | low);
+
+                    // put cycle
+                    self.write_addr(0x2004, data);
+                }
+            }
             0x4016 => self.controllers.write(data),
             _ => {
                 // TODO: APU
@@ -199,7 +224,6 @@ impl CPU {
         self.ppu_cycle += 3;
         self.ram_internal[usize::from(addr)]
     }
-
     pub(crate) fn write_zeropage(&mut self, addr: u8, data: u8) {
         self.ppu_cycle += 3;
         self.ram_internal[usize::from(addr)] = data;
