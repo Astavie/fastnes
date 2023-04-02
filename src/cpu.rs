@@ -1,17 +1,14 @@
 use crate::{
     cartridge::Cartridge,
     controller::Controllers,
-    instruction::{instructions, Instructions},
+    instruction::INSTRUCTIONS,
     ppu::{Color, PPU},
 };
 
-pub(crate) type DynCartridge = Option<Box<dyn Cartridge>>;
+pub(crate) type DynCartridge = Option<Box<dyn Cartridge + Send>>;
 
 #[allow(non_snake_case)]
 pub struct CPU {
-    // instruction list
-    instructions: Instructions,
-
     // memory
     rom_cache: [u8; 0x8000],
     ram_internal: [u8; 0x0800],
@@ -36,10 +33,34 @@ pub struct CPU {
 
     // ppu
     ppu_cycle: usize,
-    ppu: Box<dyn PPU>,
+    ppu: Box<dyn PPU + Send>,
 
     // controllers
     controllers: Controllers,
+}
+
+impl Clone for CPU {
+    fn clone(&self) -> Self {
+        Self {
+            rom_cache: self.rom_cache,
+            ram_internal: self.ram_internal,
+            open: self.open,
+            PC: self.PC,
+            SP: self.SP,
+            P: self.P,
+            A: self.A,
+            X: self.X,
+            Y: self.Y,
+            irq_sample: self.irq_sample,
+            nmi_sample: self.nmi_sample,
+            res_sample: self.res_sample,
+            hardware_interrupt: self.hardware_interrupt,
+            cart: self.cart.as_ref().map(|c| (*c).clone()),
+            ppu_cycle: self.ppu_cycle,
+            ppu: self.ppu.clone(),
+            controllers: Controllers::disconnected(),
+        }
+    }
 }
 
 impl CPU {
@@ -54,7 +75,7 @@ impl CPU {
             self.read_pc()
         };
 
-        let instr = self.instructions[usize::from(op)];
+        let instr = INSTRUCTIONS[usize::from(op)];
         instr(self);
     }
     pub fn reset(&mut self) {
@@ -64,12 +85,11 @@ impl CPU {
         self.ppu.reset();
     }
     pub fn new(
-        cart: impl Cartridge + 'static,
+        cart: impl Cartridge + 'static + Send,
         controllers: Controllers,
-        ppu: impl PPU + 'static,
+        ppu: impl PPU + 'static + Send,
     ) -> Self {
         CPU {
-            instructions: instructions(),
             PC: 0,
             SP: 0,
             P: 0,
@@ -95,8 +115,11 @@ impl CPU {
     pub fn frame(&self) -> [Color; 61440] {
         self.ppu.frame(&self.cart)
     }
-    pub fn frame_no(&self) -> usize {
-        self.ppu.frame_no()
+    pub fn frame_no(&mut self) -> usize {
+        self.ppu.frame_no(self.ppu_cycle)
+    }
+    pub fn set_controllers(&mut self, c: Controllers) {
+        self.controllers = c;
     }
 
     // HELPER FUNCTIONS

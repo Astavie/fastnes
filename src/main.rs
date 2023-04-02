@@ -5,22 +5,25 @@
 #![feature(const_mut_refs)]
 #![feature(is_some_and)]
 
-use std::fs::read;
-use std::sync::atomic::Ordering;
-use std::sync::mpsc;
-use std::thread;
-use std::time::{Duration, Instant};
+use rand::Rng;
 
 use sdl2::event::Event;
-use sdl2::keyboard::Keycode;
 use sdl2::pixels::Color;
 use sdl2::rect::Point;
 
+use std::fs::read;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
+use std::thread;
+use std::time::Duration;
+
+extern crate rand;
 extern crate test;
 
 mod cartridge;
 mod controller;
 mod cpu;
+mod emupool;
 mod instruction;
 mod ppu;
 
@@ -234,10 +237,10 @@ mod tests {
     }
 }
 
-fn open_file(
+pub fn open_file(
     path: &str,
     controllers: controller::Controllers,
-    ppu: impl ppu::PPU + 'static,
+    ppu: impl ppu::PPU + 'static + Send,
 ) -> cpu::CPU {
     let file = read(path).unwrap();
 
@@ -262,36 +265,244 @@ fn open_file(
         _ => panic!(),
     };
 
-    cpu::CPU::new(cartridge, controllers, ppu)
+    let mut cpu = cpu::CPU::new(cartridge, controllers, ppu);
+    cpu.reset();
+    cpu
 }
 
 fn main() {
-    let (tx_lock, rx_lock) = mpsc::channel();
     let (tx_frame, rx_frame) = mpsc::channel();
+    let (tx_inputs, rx_inputs) = mpsc::channel();
+
+    let frame_request = Arc::new(AtomicBool::new(false));
+
+    let tx_framed_cloned = tx_frame.clone();
+    let frame_request_cloned = Arc::clone(&frame_request);
+    thread::spawn(move || -> ! {
+        let mut input_lists: Vec<Vec<u8>> = Vec::new();
+        let marios = 16;
+
+        let single_mario_run = 10;
+
+        for _ in 0..marios {
+            input_lists.push(vec![
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0b00001000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            ]);
+        }
+
+        let mut generation = 0;
+        let mut last_best = 0;
+
+        let pool = emupool::EmuPool::new(8, "rom/smb.nes", single_mario_run * 2);
+        let mut last_revert = 1;
+        let mut reverts = 1;
+
+        loop {
+            let mut results = Vec::new();
+            for _ in 0..marios {
+                results.push((false, 0));
+            }
+
+            // train marios
+            for run in 0..single_mario_run {
+                let (tx, rx) = mpsc::channel();
+
+                for mario in 0..marios {
+                    if run > 0 {
+                        // add random inputs
+                        if mario == 0 {
+                            // mario 0 always repeats
+                            let last = *input_lists[mario].last().unwrap();
+                            input_lists[mario].push(last);
+                        } else if mario <= marios / 2 {
+                            // random movement
+                            let input: u8 = rand::thread_rng().gen();
+                            input_lists[mario].push(input & 0b11110011);
+                        } else {
+                            // flip one bit from last input
+                            let last = *input_lists[mario].last().unwrap();
+                            let input: u8 = rand::thread_rng().gen_range(0..8);
+                            input_lists[mario].push(last ^ ((1 << input) & 0b11110011));
+                        }
+                    }
+
+                    let inputs = input_lists[mario].clone();
+                    let tx = tx.clone();
+
+                    let frame_request = Arc::clone(&frame_request_cloned);
+                    let tx_frame = tx_framed_cloned.clone();
+                    pool.run(move |cpu, input| {
+                        if frame_request
+                            .compare_exchange_weak(
+                                true,
+                                false,
+                                Ordering::Relaxed,
+                                Ordering::Relaxed,
+                            )
+                            .is_ok()
+                        {
+                            tx_frame.send(Box::new(cpu.frame())).unwrap();
+                        }
+
+                        if cpu.frame_no() < inputs.len() {
+                            input.store(inputs[cpu.frame_no()], Ordering::Relaxed);
+                            true
+                        } else {
+                            let mut mario_position: u32 = u32::from(cpu.read(0x075f)) << 24 // world number
+                    | u32::from(cpu.read(0x0760)) << 16 // area number
+                    | u32::from(cpu.read(0x6d)) << 8 // player page
+                    | u32::from(cpu.read(0x86)); // player x
+
+                            let mut score: u32 = 0;
+                            for i in 0..=5 {
+                                let digit = i;
+                                score *= 10;
+                                score += u32::from(cpu.read(0x07dd + digit));
+                            }
+
+                            let mode = cpu.read(0x0770);
+
+                            let mario_y =
+                                u16::from(cpu.read(0xb5)) << 8 | u16::from(cpu.read(0xce));
+                            if mario_y > 456
+                                || cpu.read(0x0e) == 6
+                                || cpu.read(0x0e) == 11
+                                || mode == 0
+                                || mode == 3
+                            {
+                                mario_position = 0;
+                                score = 0;
+                            }
+
+                            let fitness: u64 = u64::from(score) << 32 | u64::from(mario_position);
+                            let cutscene = cpu.read(0x0e) <= 7 || mode == 2;
+                            tx.send((mario, fitness, cutscene)).unwrap();
+                            false
+                        }
+                    });
+                }
+
+                for _ in 0..marios {
+                    let (mario, fitness, cutscene) = rx.recv().unwrap();
+                    if run == 0 {
+                        results[mario] = (cutscene, fitness);
+                    } else {
+                        let last_result = results[mario].1;
+                        if fitness >= last_result || cutscene {
+                            // this is better
+                            results[mario] = (cutscene, fitness);
+                        } else {
+                            // this is worse
+                            input_lists[mario].pop();
+                        }
+                    }
+                }
+            }
+
+            // get best mario
+            {
+                let positions: Vec<_> = results
+                    .iter()
+                    .map(|x| (x.1 as u16, (x.1 >> 16) as u8, (x.1 >> 24) as u8))
+                    .collect();
+                println!("gen {}: {:?}", generation, positions);
+            }
+
+            let successful = results
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, x)| *x)
+                .unwrap()
+                .0;
+            let best = input_lists[successful].clone();
+
+            // play back most successful version
+            tx_inputs.send(best.clone()).unwrap();
+
+            // check for any improvement
+            if results.iter().all(|x| x.1 <= last_best && !x.0) {
+                last_best = 0;
+
+                if pool.frame_no() == last_revert {
+                    reverts += 1;
+                    if reverts > 20 {
+                        reverts = 20;
+                    }
+                } else {
+                    reverts = 1;
+                    last_revert = pool.frame_no();
+                }
+
+                // reset last 2 inputs
+                for inputs in input_lists.iter_mut() {
+                    for _ in 0..single_mario_run * reverts {
+                        inputs.pop();
+                    }
+                }
+
+                for _ in 0..reverts {
+                    pool.revert();
+                }
+            } else {
+                last_best = results[successful].1;
+
+                // mario hivemind
+                for mario in 0..marios {
+                    input_lists[mario] = best.clone();
+                }
+
+                pool.run_save(move |cpu, input| {
+                    if cpu.frame_no() < best.len() - 1 {
+                        input.store(best[cpu.frame_no()], Ordering::Relaxed);
+                        true
+                    } else {
+                        false
+                    }
+                });
+            }
+
+            generation += 1;
+        }
+    });
 
     thread::spawn(move || {
         let (controllers, input) = controller::Controllers::standard();
         let mut cpu = open_file("rom/smb.nes", controllers, ppu::FastPPU::new());
-        cpu.reset();
 
-        let mut cycle_target = 29780 / 2;
+        let mut last: Vec<u8> = vec![];
+
         loop {
-            const FRAMES: usize = 1;
-            cycle_target += 29780 * FRAMES;
-
-            let start = Instant::now();
-            while cpu.cycle() < cycle_target {
-                cpu.instruction();
+            let mut best = rx_inputs.recv().unwrap();
+            while let Ok(inputs) = rx_inputs.try_recv() {
+                best = inputs;
             }
-            let duration = start.elapsed();
 
-            println!("{} fps", FRAMES as f64 / duration.as_secs_f64());
+            cpu.reset();
 
-            if let Ok(_) = rx_lock.recv() {
-                tx_frame
-                    .send((Box::new(cpu.frame()), input.clone()))
-                    .unwrap();
+            let mut skip = true;
+            for frame in 0..best.len() {
+                if frame >= last.len() || last[frame] != best[frame] {
+                    skip = false;
+                }
+
+                input.store(best[frame], Ordering::Relaxed);
+
+                while cpu.frame_no() == frame {
+                    cpu.instruction();
+                }
+
+                if !skip {
+                    tx_frame.send(Box::new(cpu.frame())).unwrap();
+                    ::std::thread::sleep(Duration::new(0, 1_000_000_000u32 / 60));
+                }
             }
+
+            last = best;
         }
     });
 
@@ -315,8 +526,13 @@ fn main() {
     'running: loop {
         canvas.clear();
 
-        tx_lock.send(()).unwrap();
-        let (frame, input) = rx_frame.recv().unwrap();
+        let frame = match rx_frame.try_recv() {
+            Ok(frame) => frame,
+            Err(_) => {
+                frame_request.store(true, Ordering::Relaxed);
+                rx_frame.recv().unwrap()
+            }
+        };
 
         for screen_y in 0..240 {
             for screen_x in 0..256 {
@@ -331,107 +547,9 @@ fn main() {
             }
         }
 
-        let val = input.load(Ordering::Relaxed);
-
         for event in event_pump.poll_iter() {
             match event {
                 Event::Quit { .. } => break 'running,
-                Event::KeyDown {
-                    keycode: Some(Keycode::Z),
-                    ..
-                } => {
-                    input.store(val | 0b00000001, Ordering::Relaxed);
-                }
-                Event::KeyDown {
-                    keycode: Some(Keycode::X),
-                    ..
-                } => {
-                    input.store(val | 0b00000010, Ordering::Relaxed);
-                }
-                Event::KeyDown {
-                    keycode: Some(Keycode::RShift),
-                    ..
-                } => {
-                    input.store(val | 0b00000100, Ordering::Relaxed);
-                }
-                Event::KeyDown {
-                    keycode: Some(Keycode::Return),
-                    ..
-                } => {
-                    input.store(val | 0b00001000, Ordering::Relaxed);
-                }
-                Event::KeyDown {
-                    keycode: Some(Keycode::Up),
-                    ..
-                } => {
-                    input.store(val | 0b00010000, Ordering::Relaxed);
-                }
-                Event::KeyDown {
-                    keycode: Some(Keycode::Down),
-                    ..
-                } => {
-                    input.store(val | 0b00100000, Ordering::Relaxed);
-                }
-                Event::KeyDown {
-                    keycode: Some(Keycode::Left),
-                    ..
-                } => {
-                    input.store(val | 0b01000000, Ordering::Relaxed);
-                }
-                Event::KeyDown {
-                    keycode: Some(Keycode::Right),
-                    ..
-                } => {
-                    input.store(val | 0b10000000, Ordering::Relaxed);
-                }
-                Event::KeyUp {
-                    keycode: Some(Keycode::Z),
-                    ..
-                } => {
-                    input.store(val & 0b11111110, Ordering::Relaxed);
-                }
-                Event::KeyUp {
-                    keycode: Some(Keycode::X),
-                    ..
-                } => {
-                    input.store(val & 0b11111101, Ordering::Relaxed);
-                }
-                Event::KeyUp {
-                    keycode: Some(Keycode::RShift),
-                    ..
-                } => {
-                    input.store(val & 0b11111011, Ordering::Relaxed);
-                }
-                Event::KeyUp {
-                    keycode: Some(Keycode::Return),
-                    ..
-                } => {
-                    input.store(val & 0b11110111, Ordering::Relaxed);
-                }
-                Event::KeyUp {
-                    keycode: Some(Keycode::Up),
-                    ..
-                } => {
-                    input.store(val & 0b11101111, Ordering::Relaxed);
-                }
-                Event::KeyUp {
-                    keycode: Some(Keycode::Down),
-                    ..
-                } => {
-                    input.store(val & 0b11011111, Ordering::Relaxed);
-                }
-                Event::KeyUp {
-                    keycode: Some(Keycode::Left),
-                    ..
-                } => {
-                    input.store(val & 0b10111111, Ordering::Relaxed);
-                }
-                Event::KeyUp {
-                    keycode: Some(Keycode::Right),
-                    ..
-                } => {
-                    input.store(val & 0b01111111, Ordering::Relaxed);
-                }
                 _ => (),
             }
         }

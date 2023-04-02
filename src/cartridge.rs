@@ -10,6 +10,8 @@ pub trait Cartridge {
 
     fn read_nametable(&self, addr: u16) -> u8;
     fn write_nametable(&mut self, addr: u16, data: u8);
+
+    fn clone(&self) -> Box<dyn Cartridge + Send>;
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -20,6 +22,7 @@ pub enum Mirroring {
     Horizontal,
 }
 
+#[derive(Clone)]
 pub struct MirroredNametable {
     mirroring: Mirroring,
     a: [u8; 0x0400],
@@ -68,6 +71,7 @@ impl MirroredNametable {
     }
 }
 
+#[derive(Clone)]
 pub struct NROM {
     nametable: MirroredNametable,
     chr: [u8; 0x2000],
@@ -132,5 +136,9 @@ impl Cartridge for NROM {
 
     fn write_prg_ram(&mut self, addr: u16, data: u8) {
         self.ram[usize::from(addr & 0x1FFF)] = data;
+    }
+
+    fn clone(&self) -> Box<dyn Cartridge + Send> {
+        Box::new(Clone::clone(self))
     }
 }

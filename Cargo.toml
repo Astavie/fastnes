@@ -7,7 +7,9 @@ edition = "2021"
 
 [dependencies]
 enumset = "1.0.12"
+rand = "0.8.5"
 repeated = "0.1.2"
+threadpool = "1.8.1"
 
 [dependencies.sdl2]
 version = "0.35.2"

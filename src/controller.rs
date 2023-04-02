@@ -4,8 +4,8 @@ use std::sync::{
 };
 
 pub struct Controllers {
-    left: Box<dyn Controller>,
-    right: Box<dyn Controller>,
+    left: Box<dyn Controller + Send>,
+    right: Box<dyn Controller + Send>,
 }
 
 impl Controllers {

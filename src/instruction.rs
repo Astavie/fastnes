@@ -985,12 +985,10 @@ const fn branch<const MASK: u8, const ZERO: bool>() -> Instruction {
     }
 }
 
-pub fn instructions() -> Instructions {
-    repeated!(
-        %%s prelude [ prelude s%%
-        for op in [0;255] {
-            instruction::<%%op%%>(),
-        }
-        %%e postlude ] postlude e%%
-    )
-}
+pub const INSTRUCTIONS: Instructions = repeated!(
+    %%s prelude [ prelude s%%
+    for op in [0;255] {
+        instruction::<%%op%%>(),
+    }
+    %%e postlude ] postlude e%%
+);

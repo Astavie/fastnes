@@ -17,7 +17,9 @@ pub trait PPU {
     fn reset(&mut self);
 
     fn frame(&self, cart: &DynCartridge) -> [Color; 61440]; // 256 * 240 pixels
-    fn frame_no(&self, cycle: usize) -> usize;
+    fn frame_no(&mut self, cycle: usize) -> usize;
+
+    fn clone(&self) -> Box<dyn PPU + Send>;
 }
 
 pub(crate) struct DummyPPU;
@@ -36,8 +38,12 @@ impl PPU for DummyPPU {
     fn frame(&self, _cart: &DynCartridge) -> [Color; 61440] {
         [Color { r: 0, g: 0, b: 0 }; 61440]
     }
-    fn frame_no(&self, cycle: usize) -> usize {
+    fn frame_no(&mut self, _cycle: usize) -> usize {
         0
+    }
+
+    fn clone(&self) -> Box<dyn PPU + Send> {
+        Box::new(DummyPPU)
     }
 }
 
@@ -162,6 +168,7 @@ enum PPUMASK {
 }
 
 #[allow(non_snake_case)]
+#[derive(Clone)]
 pub(crate) struct FastPPU {
     open: u8,
 
@@ -376,7 +383,12 @@ impl FastPPU {
         }
     }
 
-    fn draw_sprites(&self, background: bool, cart: &Box<dyn Cartridge>, frame: &mut [Color]) {
+    fn draw_sprites(
+        &self,
+        background: bool,
+        cart: &Box<dyn Cartridge + Send>,
+        frame: &mut [Color],
+    ) {
         for sprite in 0..64 {
             let data = &self.OAM[sprite * 4..];
 
@@ -458,7 +470,7 @@ impl FastPPU {
         }
     }
 
-    fn draw_tiles(&self, cart: &Box<dyn Cartridge>, frame: &mut [Color]) {
+    fn draw_tiles(&self, cart: &Box<dyn Cartridge + Send>, frame: &mut [Color]) {
         let nametable = self.nametable.addr();
 
         let x_start = if self.PPUMASK.contains(PPUMASK::ShowBackgroundLeft) {
@@ -752,17 +764,27 @@ impl PPU for FastPPU {
         let mut frame = [PALETTE[usize::from(self.palette_ram[0])]; 61440];
 
         if let Some(cart) = cart {
-            self.draw_sprites(true, cart, &mut frame);
-            self.draw_tiles(cart, &mut frame);
-            self.draw_sprites(false, cart, &mut frame);
+            if self.PPUMASK.contains(PPUMASK::ShowSprites) {
+                self.draw_sprites(true, cart, &mut frame);
+            }
+            if self.PPUMASK.contains(PPUMASK::ShowBackground) {
+                self.draw_tiles(cart, &mut frame);
+            }
+            if self.PPUMASK.contains(PPUMASK::ShowSprites) {
+                self.draw_sprites(false, cart, &mut frame);
+            }
         }
 
         frame
     }
 
-    fn frame_no(&self, cycle: usize) -> usize {
+    fn frame_no(&mut self, cycle: usize) -> usize {
         self.sync(cycle);
         self.frame
+    }
+
+    fn clone(&self) -> Box<dyn PPU + Send> {
+        Box::new(Clone::clone(self))
     }
 }
 
