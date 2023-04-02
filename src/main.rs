@@ -97,42 +97,12 @@ mod tests {
         });
     }
 
-    #[bench]
-    fn dk(b: &mut Bencher) {
-        let mut dk = open_file(
-            "rom/dk.nes",
-            controller::Controllers::standard().0,
-            ppu::FastPPU::new(),
-        );
-
-        // run dk for 1000 frames
-        b.iter(|| {
-            dk.reset();
-
-            const FRAME: usize = 29780;
-            const FRAMES: usize = 1000;
-            const TARGET: usize = FRAME * FRAMES + FRAMES / 2;
-
-            while dk.cycle() < TARGET {
-                dk.instruction();
-            }
-        })
-    }
-
     fn test_file(file: &str) {
-        let file = read(file).unwrap();
-
-        let cartridge = cartridge::NROM::new_256(
-            cartridge::Mirroring::Horizontal,
-            [0; 0x2000],
-            file[16..32784].try_into().unwrap(),
-        );
-        let mut cpu = cpu::CPU::new(
-            cartridge,
+        let mut cpu = open_file(
+            file,
             controller::Controllers::disconnected(),
             ppu::FastPPU::new(),
         );
-
         cpu.reset();
 
         let mut started = false;
@@ -150,7 +120,7 @@ mod tests {
 
             if cpu.cycle() > 10_000_000 {
                 println!("forcefully halted");
-                break;
+                assert!(false);
             }
         }
 
@@ -160,7 +130,7 @@ mod tests {
             read += 1;
         }
 
-        assert_eq!(cpu.read(read), 0);
+        assert_eq!(cpu.read(0x6000), 0);
     }
 
     #[test]
@@ -212,6 +182,56 @@ mod tests {
     fn even_odd_timing() {
         test_file("test/ppu_vbl_nmi/10-even_odd_timing.nes");
     }
+
+    #[test]
+    fn sprite_hit_basics() {
+        test_file("test/ppu_sprite_hit/01-basics.nes");
+    }
+
+    #[test]
+    fn sprite_hit_alignment() {
+        test_file("test/ppu_sprite_hit/02-alignment.nes");
+    }
+
+    #[test]
+    fn sprite_hit_corners() {
+        test_file("test/ppu_sprite_hit/03-corners.nes");
+    }
+
+    #[test]
+    fn sprite_hit_flip() {
+        test_file("test/ppu_sprite_hit/04-flip.nes");
+    }
+
+    #[test]
+    fn sprite_hit_left_clip() {
+        test_file("test/ppu_sprite_hit/05-left_clip.nes");
+    }
+
+    #[test]
+    fn sprite_hit_right_edge() {
+        test_file("test/ppu_sprite_hit/06-right_edge.nes");
+    }
+
+    #[test]
+    fn sprite_hit_screen_bottom() {
+        test_file("test/ppu_sprite_hit/07-screen_bottom.nes");
+    }
+
+    #[test]
+    fn sprite_hit_double_height() {
+        test_file("test/ppu_sprite_hit/08-double_height.nes");
+    }
+
+    #[test]
+    fn sprite_hit_timing() {
+        test_file("test/ppu_sprite_hit/09-timing.nes");
+    }
+
+    #[test]
+    fn sprite_hit_timing_order() {
+        test_file("test/ppu_sprite_hit/10-timing_order.nes");
+    }
 }
 
 fn open_file(
@@ -251,12 +271,12 @@ fn main() {
 
     thread::spawn(move || {
         let (controllers, input) = controller::Controllers::standard();
-        let mut cpu = open_file("rom/dk.nes", controllers, ppu::FastPPU::new());
+        let mut cpu = open_file("rom/smb.nes", controllers, ppu::FastPPU::new());
         cpu.reset();
 
-        let mut cycle_target = 0;
+        let mut cycle_target = 29780 / 2;
         loop {
-            const FRAMES: usize = 1000;
+            const FRAMES: usize = 1;
             cycle_target += 29780 * FRAMES;
 
             let start = Instant::now();
@@ -267,7 +287,7 @@ fn main() {
 
             println!("{} fps", FRAMES as f64 / duration.as_secs_f64());
 
-            if let Ok(_) = rx_lock.try_recv() {
+            if let Ok(_) = rx_lock.recv() {
                 tx_frame
                     .send((Box::new(cpu.frame()), input.clone()))
                     .unwrap();

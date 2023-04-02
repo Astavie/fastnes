@@ -17,6 +17,7 @@ pub trait PPU {
     fn reset(&mut self);
 
     fn frame(&self, cart: &DynCartridge) -> [Color; 61440]; // 256 * 240 pixels
+    fn frame_no(&self, cycle: usize) -> usize;
 }
 
 pub(crate) struct DummyPPU;
@@ -35,6 +36,9 @@ impl PPU for DummyPPU {
     fn frame(&self, _cart: &DynCartridge) -> [Color; 61440] {
         [Color { r: 0, g: 0, b: 0 }; 61440]
     }
+    fn frame_no(&self, cycle: usize) -> usize {
+        0
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -48,7 +52,7 @@ impl Direction {
         *addr = (match self {
             Self::Across => *addr + 1,
             Self::Down => *addr + 32,
-        }) & 0x3FFF;
+        }) & 0x7FFF;
     }
 }
 
@@ -78,6 +82,17 @@ impl From<u8> for Nametable {
             2 => Self::BottomLeft,
             3 => Self::BottomRight,
             _ => panic!(),
+        }
+    }
+}
+
+impl From<Nametable> for u8 {
+    fn from(value: Nametable) -> Self {
+        match value {
+            Nametable::TopLeft => 0,
+            Nametable::TopRight => 1,
+            Nametable::BottomLeft => 2,
+            Nametable::BottomRight => 3,
         }
     }
 }
@@ -120,16 +135,16 @@ impl PatternTable {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SpriteSize {
-    Small, // 8x8
-    Tall,  // 8x16
+    Single, // 8x8
+    Double, // 8x16
 }
 
 impl From<bool> for SpriteSize {
     fn from(value: bool) -> Self {
         if value {
-            Self::Tall
+            Self::Double
         } else {
-            Self::Small
+            Self::Single
         }
     }
 }
@@ -149,17 +164,23 @@ enum PPUMASK {
 #[allow(non_snake_case)]
 pub(crate) struct FastPPU {
     open: u8,
-    odd_frame: bool,
 
-    this_vbl: Option<usize>,
     next_vbl: usize,
     next_nmi: Option<usize>,
+    next_sprite_0: Option<usize>,
+    vbl_started: Option<usize>,
+    last_cycle: usize,
+
+    frame: usize,
 
     // registers
-    PPUADDR: u16,
     PPUMASK: EnumSet<PPUMASK>,
     OAMADDR: u8,
-    PPUSCROLL: u16,
+    PPUDATA: u8,
+    scroll_x: u8,
+    scroll_y: u8,
+    w: u8,
+    v: u16,
 
     // PPUCTRL
     nametable: Nametable,
@@ -181,23 +202,28 @@ impl FastPPU {
     pub fn new() -> Self {
         FastPPU {
             next_vbl: 241 * SCANLINE + 1,
-            this_vbl: None,
             next_nmi: None,
-            odd_frame: false,
+            frame: 0,
             open: 0,
+            vbl_started: None,
+            next_sprite_0: None,
+            last_cycle: 0,
 
             // registers
-            PPUADDR: 0,
             PPUMASK: EnumSet::new(),
             OAMADDR: 0,
-            PPUSCROLL: 0,
+            PPUDATA: 0,
+            scroll_x: 0,
+            scroll_y: 0,
+            w: 0,
+            v: 0,
 
             // PPUCTRL
             nametable: Nametable::TopLeft,
             vram_direction: Direction::Across,
             sprite_table: PatternTable::Left,
             background_table: PatternTable::Left,
-            sprite_size: SpriteSize::Small,
+            sprite_size: SpriteSize::Single,
             nmi_output: false,
 
             // memory
@@ -208,24 +234,146 @@ impl FastPPU {
     fn sync(&mut self, cycle: usize) {
         // get next vblank
         while cycle >= self.next_vbl {
-            self.this_vbl = Some(self.next_vbl);
-            self.odd_frame = !self.odd_frame;
+            self.frame += 1;
+            self.vbl_started = Some(self.next_vbl);
             self.next_vbl += FRAME
-                - usize::from(self.PPUMASK.contains(PPUMASK::ShowBackground) && self.odd_frame);
+                - usize::from(
+                    self.PPUMASK.contains(PPUMASK::ShowBackground) && (self.frame & 1 == 1),
+                );
         }
 
         // end vblank after 20 scanlines
-        self.this_vbl = self.this_vbl.filter(|i| cycle <= i + 20 * SCANLINE);
-
-        // get next nmi signal
-        self.next_nmi();
+        self.vbl_started = self.vbl_started.filter(|i| cycle <= i + 20 * SCANLINE);
     }
-    fn next_nmi(&mut self) {
-        self.next_nmi = if self.nmi_output {
-            Some(self.this_vbl.unwrap_or(self.next_vbl))
-        } else {
-            None
-        };
+    fn next_sprite_0(&mut self, cycle: usize, cart: &DynCartridge) {
+        // check if previous sprite0 check was still this frame
+        self.next_sprite_0 = self.next_sprite_0.filter(|i| {
+            *i >= self
+                .vbl_started
+                .filter(|i| cycle < i + 20 * SCANLINE)
+                .unwrap_or(self.next_vbl)
+                - 241 * SCANLINE
+                + 1
+        });
+
+        if !self.next_sprite_0.is_some()
+            && self.PPUMASK.contains(PPUMASK::ShowBackground)
+            && self.PPUMASK.contains(PPUMASK::ShowSprites)
+        {
+            if let Some(cart) = cart {
+                let frame_start = self
+                    .vbl_started
+                    .filter(|i| cycle < i + 20 * SCANLINE)
+                    .unwrap_or(self.next_vbl)
+                    - 241 * SCANLINE
+                    + 1;
+
+                let x = self.OAM[3];
+                let y = self.OAM[0];
+
+                let tile = self.OAM[1];
+                let flip_hor = self.OAM[2] & 0b01000000 != 0;
+                let flip_ver = self.OAM[2] & 0b10000000 != 0;
+
+                let pattern_addr = match self.sprite_size {
+                    SpriteSize::Single => self.sprite_table.addr() + u16::from(tile) * 16,
+                    SpriteSize::Double => {
+                        (u16::from(tile & 1) * 0x1000) + u16::from(tile & 0b11111110) * 16
+                    }
+                };
+
+                let height = match self.sprite_size {
+                    SpriteSize::Single => 8,
+                    SpriteSize::Double => 16,
+                };
+
+                let nametable = self.nametable.addr();
+
+                for ypos in 0..height {
+                    for xpos in 0..8 {
+                        let screen_x = u16::from(x) + xpos as u16;
+                        let screen_y = u16::from(y) + 1 + ypos as u16;
+
+                        // check if off the screen
+                        if screen_x < 8
+                            && (!self.PPUMASK.contains(PPUMASK::ShowBackgroundLeft)
+                                || !self.PPUMASK.contains(PPUMASK::ShowSpritesLeft))
+                        {
+                            continue;
+                        }
+
+                        if screen_x >= 255 || screen_y >= 240 {
+                            continue;
+                        }
+
+                        // check if after last cycle
+                        let dot_cycle =
+                            frame_start + usize::from(screen_y) * SCANLINE + usize::from(screen_x);
+
+                        if dot_cycle <= self.last_cycle {
+                            continue;
+                        }
+
+                        // get if opaque
+                        let sprite_x: u8 = if flip_hor { 7 - xpos } else { xpos };
+                        let sprite_y: u8 = if flip_ver { height - 1 - ypos } else { ypos };
+
+                        let pattern_addr = if sprite_y >= 8 {
+                            pattern_addr + u16::from(sprite_y) + 8
+                        } else {
+                            pattern_addr + u16::from(sprite_y)
+                        };
+
+                        let color_lo = (cart.read_chr(pattern_addr) >> (7 - sprite_x)) & 1;
+                        let color_hi = (cart.read_chr(pattern_addr + 8) >> (7 - sprite_x)) & 1;
+                        let color_indx = color_lo | (color_hi << 1);
+
+                        if color_indx == 0 {
+                            continue;
+                        }
+
+                        // get if tile underneath is opaque
+                        let mut x = screen_x + u16::from(self.scroll_x);
+                        let mut y = screen_y + u16::from(self.scroll_y);
+                        let mut nametable = nametable;
+
+                        if x >= 256 {
+                            // nametable to the right
+                            x -= 256;
+                            nametable += 0x400;
+                        }
+
+                        if y >= 240 {
+                            // nametable to the bottom
+                            y -= 240;
+                            nametable += 0x800;
+                        }
+
+                        let tile_addr = nametable + (x / 8) + (y / 8) * 32;
+                        let tile = cart.read_nametable(tile_addr);
+
+                        let tile_x = x & 7;
+                        let tile_y = y & 7;
+
+                        let pattern_addr =
+                            self.background_table.addr() + u16::from(tile) * 16 + tile_y;
+
+                        let color_lo = (cart.read_chr(pattern_addr) >> (7 - tile_x)) & 1;
+                        let color_hi = (cart.read_chr(pattern_addr + 8) >> (7 - tile_x)) & 1;
+                        let color_indx = color_lo | (color_hi << 1);
+
+                        if color_indx == 0 {
+                            continue;
+                        }
+
+                        // sprite 0 hit!
+                        self.next_sprite_0 = Some(dot_cycle);
+                        return;
+                    }
+                }
+            }
+            self.last_cycle = cycle;
+        }
     }
 
     fn draw_sprites(&self, background: bool, cart: &Box<dyn Cartridge>, frame: &mut [Color]) {
@@ -244,15 +392,15 @@ impl FastPPU {
 
             let tile = data[1];
             let pattern_addr = match self.sprite_size {
-                SpriteSize::Small => self.sprite_table.addr() + u16::from(tile) * 16,
-                SpriteSize::Tall => {
+                SpriteSize::Single => self.sprite_table.addr() + u16::from(tile) * 16,
+                SpriteSize::Double => {
                     (u16::from(tile & 1) * 0x1000) + u16::from(tile & 0b11111110) * 16
                 }
             };
 
             let height = match self.sprite_size {
-                SpriteSize::Small => 8,
-                SpriteSize::Tall => 16,
+                SpriteSize::Single => 8,
+                SpriteSize::Double => 16,
             };
 
             let palette = data[2] & 0b11;
@@ -260,7 +408,7 @@ impl FastPPU {
             let flip_ver = data[2] & 0b10000000 != 0;
 
             let x = data[3];
-            let y = data[0] + 1;
+            let y = data[0];
 
             for sprite_y in 0..height {
                 for sprite_x in 0..8 {
@@ -272,6 +420,7 @@ impl FastPPU {
                         };
 
                     let screen_y = u16::from(y)
+                        + 1
                         + if flip_ver {
                             u16::from(height - 1 - u8::from(sprite_y))
                         } else {
@@ -311,8 +460,6 @@ impl FastPPU {
 
     fn draw_tiles(&self, cart: &Box<dyn Cartridge>, frame: &mut [Color]) {
         let nametable = self.nametable.addr();
-        let scroll_x = self.PPUSCROLL >> 8;
-        let scroll_y = self.PPUSCROLL & 0xFF;
 
         let x_start = if self.PPUMASK.contains(PPUMASK::ShowBackgroundLeft) {
             0
@@ -323,8 +470,8 @@ impl FastPPU {
         // background
         for screen_y in 0..240 {
             for screen_x in x_start..256 {
-                let mut x = screen_x + scroll_x;
-                let mut y = screen_y + scroll_y;
+                let mut x = screen_x + u16::from(self.scroll_x);
+                let mut y = screen_y + u16::from(self.scroll_y);
                 let mut nametable = nametable;
 
                 if x >= 256 {
@@ -384,6 +531,8 @@ fn on_change(var: &mut bool, val: bool) -> Option<bool> {
 
 impl PPU for FastPPU {
     fn write(&mut self, cycle: usize, addr: u16, data: u8, cart: &mut DynCartridge) {
+        self.sync(cycle);
+
         self.open = data;
         match addr & 7 {
             // PPUCTRL
@@ -398,10 +547,9 @@ impl PPU for FastPPU {
                 match on_change(&mut self.nmi_output, data & 0b10000000 != 0) {
                     Some(true) => {
                         // enable
-                        self.sync(cycle);
                         self.next_nmi = Some(
                             // ignore last dot of vblank
-                            self.this_vbl
+                            self.vbl_started
                                 .filter(|i| cycle < i + 20 * SCANLINE)
                                 .unwrap_or(self.next_vbl),
                         );
@@ -417,14 +565,13 @@ impl PPU for FastPPU {
             1 => {
                 let old = self.PPUMASK.contains(PPUMASK::ShowBackground);
                 let val = EnumSet::from_u8(data);
-                let new = self.PPUMASK.contains(PPUMASK::ShowBackground);
+                let new = val.contains(PPUMASK::ShowBackground);
 
                 // background
                 if old != new {
-                    self.sync(cycle);
                     if new {
                         // enable background
-                        if self.odd_frame && cycle < self.next_vbl - 241 * SCANLINE - 3 {
+                        if (self.frame & 1 == 1) && cycle < self.next_vbl - 241 * SCANLINE - 3 {
                             if let Some(next) = self.next_nmi.as_mut() {
                                 if *next == self.next_vbl {
                                     *next -= 1;
@@ -434,7 +581,7 @@ impl PPU for FastPPU {
                         }
                     } else {
                         // disable background
-                        if self.odd_frame && cycle < self.next_vbl - 241 * SCANLINE - 2 {
+                        if (self.frame & 1 == 1) && cycle < self.next_vbl - 241 * SCANLINE - 2 {
                             if let Some(next) = self.next_nmi.as_mut() {
                                 if *next == self.next_vbl {
                                     *next += 1;
@@ -458,20 +605,43 @@ impl PPU for FastPPU {
             }
             // PPUSCROLL
             5 => {
-                self.PPUSCROLL = (self.PPUSCROLL << 8) | u16::from(data);
+                if self.w == 0 {
+                    self.scroll_x = data;
+                } else {
+                    self.scroll_y = data;
+                }
+                self.w ^= 1;
             }
             // PPUADDR
             6 => {
-                self.PPUADDR = ((self.PPUADDR << 8) | u16::from(data)) & 0x3FFF;
+                if self.w == 0 {
+                    self.scroll_y &= 0b00111000;
+                    self.scroll_y |= (data >> 4) & 0b111;
+                    self.nametable = Nametable::from((data >> 2) & 0b11);
+                    self.scroll_y |= (data << 6) & 0b11000000;
+                } else {
+                    self.scroll_x &= 0b00000111;
+                    self.scroll_x |= data << 3;
+                    self.scroll_y &= 0b11000111;
+                    self.scroll_y |= (data >> 2) & 0b00111000;
+
+                    let mut high: u8 = 0;
+                    high |= (self.scroll_y & 0b111) << 4;
+                    high |= (self.scroll_y >> 6) & 0b11;
+                    high |= u8::from(self.nametable) << 2;
+                    self.v = u16::from(high) << 8 | u16::from(data);
+                }
+                self.w ^= 1;
             }
             // PPUDATA
             7 => {
-                if self.PPUADDR >= 0x3F00 && self.PPUADDR < 0x3F20 {
+                let addr = self.v & 0x3FFF;
+                if addr >= 0x3F00 && addr < 0x3F20 {
                     // palette ram
-                    self.palette_ram[usize::from(self.PPUADDR as u8)] = data;
+                    self.palette_ram[usize::from(addr as u8)] = data;
 
                     // FIXME: hacky way to implement mirrors
-                    if self.PPUADDR as u8 >= 0x10 {
+                    if addr as u8 >= 0x10 {
                         self.palette_ram[0x00] = self.palette_ram[0x10];
                         self.palette_ram[0x04] = self.palette_ram[0x14];
                         self.palette_ram[0x08] = self.palette_ram[0x18];
@@ -483,42 +653,81 @@ impl PPU for FastPPU {
                         self.palette_ram[0x1C] = self.palette_ram[0x0C];
                     }
                 } else if let Some(cart) = cart.as_mut() {
-                    match self.PPUADDR & 0x2000 {
+                    match addr & 0x2000 {
                         // pattern table
-                        0x0000 => cart.write_chr(self.PPUADDR, data),
+                        0x0000 => cart.write_chr(addr, data),
 
                         // nametable
-                        0x2000 => cart.write_nametable(self.PPUADDR, data),
+                        0x2000 => cart.write_nametable(addr, data),
 
                         _ => unreachable!(),
                     }
                 }
 
                 // increment PPUADDR
-                self.vram_direction.increment(&mut self.PPUADDR);
+                self.vram_direction.increment(&mut self.v);
             }
             _ => (),
         }
+
+        // this write could have affected sprite zero
+        // FIXME: this sprite 0 system is incredibly scuffed
+        // jesus christ, please make this better
+        self.next_sprite_0.filter(|i| cycle >= *i);
+        // self.next_sprite_0(cycle, cart);
     }
 
     fn read(&mut self, cycle: usize, addr: u16, cart: &DynCartridge) -> u8 {
         match addr & 7 {
             // PPUSTATUS
             2 => {
-                // TODO: sprite overflow and sprite 0 hit
+                self.w = 0;
                 self.open &= 0b00011111;
 
-                // vblank
                 self.sync(cycle);
+                self.next_sprite_0(cycle, cart);
 
-                if self.this_vbl.is_some_and(|i| cycle != i) {
+                if self.next_sprite_0.is_some_and(|i| cycle >= i) {
+                    self.open |= 0b01000000;
+                }
+
+                // vblank
+                if self.vbl_started.is_some_and(|i| cycle != i) {
                     self.open |= 0b10000000;
                 }
 
-                if self.this_vbl.is_some() {
-                    self.this_vbl = None;
+                if self.vbl_started.is_some() {
+                    self.vbl_started = None;
                     self.next_nmi = None;
                 }
+            }
+            // PPUDATA
+            7 => {
+                let addr = self.v & 0x3FFF;
+
+                // palette data is paced immediately on the data bus
+                self.open = if addr >= 0x3F00 && addr < 0x3F20 {
+                    // palette ram
+                    self.palette_ram[usize::from(addr as u8)]
+                } else {
+                    self.PPUDATA
+                };
+
+                // reading PPUDATA *always* updates the internal buffer
+                if let Some(cart) = cart {
+                    self.PPUDATA = match addr & 0x2000 {
+                        // pattern table
+                        0x0000 => cart.read_chr(addr),
+
+                        // nametable
+                        0x2000 => cart.read_nametable(addr),
+
+                        _ => unreachable!(),
+                    }
+                }
+
+                // increment PPUADDR
+                self.vram_direction.increment(&mut self.v);
             }
             _ => todo!("read ${:04X}", addr),
         };
@@ -549,6 +758,11 @@ impl PPU for FastPPU {
         }
 
         frame
+    }
+
+    fn frame_no(&self, cycle: usize) -> usize {
+        self.sync(cycle);
+        self.frame
     }
 }
 

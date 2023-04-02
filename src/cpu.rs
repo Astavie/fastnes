@@ -95,6 +95,9 @@ impl CPU {
     pub fn frame(&self) -> [Color; 61440] {
         self.ppu.frame(&self.cart)
     }
+    pub fn frame_no(&self) -> usize {
+        self.ppu.frame_no()
+    }
 
     // HELPER FUNCTIONS
 
