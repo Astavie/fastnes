@@ -282,8 +282,16 @@ fn main() {
 
     let frame_request = Arc::new(AtomicUsize::new(0));
     let marios = 16;
-
-    mario_trainer(&tx_frame, &frame_request, marios, &tx_inputs);
+    let (tx_loop, rx_loop) = mpsc::channel();
+    let (tx_frame_loop, rx_frame_loop) = mpsc::channel();
+    mario_trainer(
+        &tx_frame,
+        &frame_request,
+        marios,
+        &tx_inputs,
+        tx_loop,
+        Some(|cpu| u32::from(cpu.read(0x075f)) >= 4),
+    );
 
     thread::spawn(move || {
         let (controllers, input) = controller::Controllers::standard();
@@ -321,6 +329,28 @@ fn main() {
         }
     });
 
+    thread::spawn(move || {
+        let (controllers, input) = controller::Controllers::standard();
+        let mut cpu = open_file("rom/smb.nes", controllers, ppu::FastPPU::new());
+
+        let best: Vec<u8> = rx_loop.recv().unwrap();
+
+        loop {
+            cpu.reset();
+
+            for frame in 0..best.len() {
+                input.store(best[frame], Ordering::Relaxed);
+
+                while cpu.frame_no() == frame {
+                    cpu.instruction();
+                }
+
+                tx_frame_loop.send(Box::new(cpu.frame())).unwrap();
+                ::std::thread::sleep(Duration::new(0, 1_000_000_000u32 / 60));
+            }
+        }
+    });
+
     let sdl_context = sdl2::init().unwrap();
     let video_subsystem = sdl_context.video().unwrap();
 
@@ -346,7 +376,7 @@ fn main() {
 
         // get training mario frames
         let mut frames = Vec::new();
-        for _ in 0..marios + 1 {
+        for _ in 0..marios + 2 {
             frames.push(None);
         }
 
@@ -359,6 +389,10 @@ fn main() {
 
         while let Ok(frame) = rx_playback.try_recv() {
             frames[0] = Some(frame);
+        }
+
+        while let Ok(frame) = rx_frame_loop.try_recv() {
+            frames[marios + 1] = Some(frame);
         }
 
         for (idx, frame) in frames.iter().enumerate() {
@@ -377,6 +411,11 @@ fn main() {
                 while start_x >= 256 * 5 {
                     start_x -= 256 * 4;
                     start_y += 240;
+                }
+
+                if idx == marios + 1 {
+                    start_x = 0;
+                    start_y = 240 * 3;
                 }
 
                 canvas
@@ -410,6 +449,8 @@ fn mario_trainer(
     frame_request: &Arc<AtomicUsize>,
     marios: usize,
     tx_inputs: &mpsc::Sender<Vec<u8>>,
+    tx_loop: mpsc::Sender<Vec<u8>>,
+    ender: Option<fn(&mut cpu::CPU) -> bool>,
 ) {
     let tx_inputs = tx_inputs.clone();
     let tx_frame = tx_frame.clone();
@@ -440,6 +481,7 @@ fn mario_trainer(
         }
 
         let mut frame = 0;
+        let mut ended = false;
 
         loop {
             let request = frame_request_cloned.load(Ordering::Relaxed);
@@ -521,8 +563,15 @@ fn mario_trainer(
 
                         let fitness: u64 = u64::from(score) << 32 | u64::from(mario_position >> 2);
 
-                        tx.send((mario, fitness, cutscene, dying, out_of_time))
-                            .unwrap();
+                        tx.send((
+                            mario,
+                            fitness,
+                            cutscene,
+                            dying,
+                            out_of_time,
+                            ender.map(|f| f(cpu)).unwrap_or(false),
+                        ))
+                        .unwrap();
 
                         false
                     }
@@ -530,7 +579,11 @@ fn mario_trainer(
             }
 
             for _ in 0..marios {
-                let (mario, fitness, cutscene, dying, out_of_time) = rx.recv().unwrap();
+                let (mario, fitness, cutscene, dying, out_of_time, end) = rx.recv().unwrap();
+                if end && !ended {
+                    ended = true;
+                    tx_loop.send(pool.input_lists[mario].clone()).unwrap();
+                }
                 results[mario] = (cutscene, fitness, dying, out_of_time);
             }
 
