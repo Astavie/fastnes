@@ -9,10 +9,10 @@ use rand::Rng;
 
 use sdl2::event::Event;
 use sdl2::pixels::Color;
-use sdl2::rect::Point;
+use sdl2::rect::Rect;
 
 use std::fs::read;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Duration;
@@ -270,205 +270,20 @@ pub fn open_file(
     cpu
 }
 
+unsafe fn any_as_u8_slice<T: Sized>(p: &T) -> &[u8] {
+    ::core::slice::from_raw_parts((p as *const T) as *const u8, ::core::mem::size_of::<T>())
+}
+
 fn main() {
     let (tx_frame, rx_frame) = mpsc::channel();
     let (tx_inputs, rx_inputs) = mpsc::channel();
 
-    let frame_request = Arc::new(AtomicBool::new(false));
+    let (tx_playback, rx_playback) = mpsc::channel();
 
-    let tx_framed_cloned = tx_frame.clone();
-    let frame_request_cloned = Arc::clone(&frame_request);
-    thread::spawn(move || -> ! {
-        let mut input_lists: Vec<Vec<u8>> = Vec::new();
-        let marios = 16;
+    let frame_request = Arc::new(AtomicUsize::new(0));
+    let marios = 16;
 
-        let single_mario_run = 10;
-
-        for _ in 0..marios {
-            input_lists.push(vec![
-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                0, 0, 0, 0, 0b00001000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            ]);
-        }
-
-        let mut generation = 0;
-        let mut last_best = 0;
-
-        let pool = emupool::EmuPool::new(8, "rom/smb.nes", single_mario_run * 2);
-        let mut last_revert = 1;
-        let mut reverts = 1;
-
-        loop {
-            let mut results = Vec::new();
-            for _ in 0..marios {
-                results.push((false, 0));
-            }
-
-            // train marios
-            for run in 0..single_mario_run {
-                let (tx, rx) = mpsc::channel();
-
-                for mario in 0..marios {
-                    if run > 0 {
-                        // add random inputs
-                        if mario == 0 {
-                            // mario 0 always repeats
-                            let last = *input_lists[mario].last().unwrap();
-                            input_lists[mario].push(last);
-                        } else if mario <= marios / 2 {
-                            // random movement
-                            let input: u8 = rand::thread_rng().gen();
-                            input_lists[mario].push(input & 0b11110011);
-                        } else {
-                            // flip one bit from last input
-                            let last = *input_lists[mario].last().unwrap();
-                            let input: u8 = rand::thread_rng().gen_range(0..8);
-                            input_lists[mario].push(last ^ ((1 << input) & 0b11110011));
-                        }
-                    }
-
-                    let inputs = input_lists[mario].clone();
-                    let tx = tx.clone();
-
-                    let frame_request = Arc::clone(&frame_request_cloned);
-                    let tx_frame = tx_framed_cloned.clone();
-                    pool.run(move |cpu, input| {
-                        if frame_request
-                            .compare_exchange_weak(
-                                true,
-                                false,
-                                Ordering::Relaxed,
-                                Ordering::Relaxed,
-                            )
-                            .is_ok()
-                        {
-                            tx_frame.send(Box::new(cpu.frame())).unwrap();
-                        }
-
-                        if cpu.frame_no() < inputs.len() {
-                            input.store(inputs[cpu.frame_no()], Ordering::Relaxed);
-                            true
-                        } else {
-                            let mut mario_position: u32 = u32::from(cpu.read(0x075f)) << 24 // world number
-                    | u32::from(cpu.read(0x0760)) << 16 // area number
-                    | u32::from(cpu.read(0x6d)) << 8 // player page
-                    | u32::from(cpu.read(0x86)); // player x
-
-                            let mut score: u32 = 0;
-                            for i in 0..=5 {
-                                let digit = i;
-                                score *= 10;
-                                score += u32::from(cpu.read(0x07dd + digit));
-                            }
-
-                            let mode = cpu.read(0x0770);
-
-                            let mario_y =
-                                u16::from(cpu.read(0xb5)) << 8 | u16::from(cpu.read(0xce));
-                            if mario_y > 456
-                                || cpu.read(0x0e) == 6
-                                || cpu.read(0x0e) == 11
-                                || mode == 0
-                                || mode == 3
-                            {
-                                mario_position = 0;
-                                score = 0;
-                            }
-
-                            let fitness: u64 = u64::from(score) << 32 | u64::from(mario_position);
-                            let cutscene = cpu.read(0x0e) <= 7 || mode == 2;
-                            tx.send((mario, fitness, cutscene)).unwrap();
-                            false
-                        }
-                    });
-                }
-
-                for _ in 0..marios {
-                    let (mario, fitness, cutscene) = rx.recv().unwrap();
-                    if run == 0 {
-                        results[mario] = (cutscene, fitness);
-                    } else {
-                        let last_result = results[mario].1;
-                        if fitness >= last_result || cutscene {
-                            // this is better
-                            results[mario] = (cutscene, fitness);
-                        } else {
-                            // this is worse
-                            input_lists[mario].pop();
-                        }
-                    }
-                }
-            }
-
-            // get best mario
-            {
-                let positions: Vec<_> = results
-                    .iter()
-                    .map(|x| (x.1 as u16, (x.1 >> 16) as u8, (x.1 >> 24) as u8))
-                    .collect();
-                println!("gen {}: {:?}", generation, positions);
-            }
-
-            let successful = results
-                .iter()
-                .enumerate()
-                .max_by_key(|(_, x)| *x)
-                .unwrap()
-                .0;
-            let best = input_lists[successful].clone();
-
-            // play back most successful version
-            tx_inputs.send(best.clone()).unwrap();
-
-            // check for any improvement
-            if results.iter().all(|x| x.1 <= last_best && !x.0) {
-                last_best = 0;
-
-                if pool.frame_no() == last_revert {
-                    reverts += 1;
-                    if reverts > 20 {
-                        reverts = 20;
-                    }
-                } else {
-                    reverts = 1;
-                    last_revert = pool.frame_no();
-                }
-
-                // reset last 2 inputs
-                for inputs in input_lists.iter_mut() {
-                    for _ in 0..single_mario_run * reverts {
-                        inputs.pop();
-                    }
-                }
-
-                for _ in 0..reverts {
-                    pool.revert();
-                }
-            } else {
-                last_best = results[successful].1;
-
-                // mario hivemind
-                for mario in 0..marios {
-                    input_lists[mario] = best.clone();
-                }
-
-                pool.run_save(move |cpu, input| {
-                    if cpu.frame_no() < best.len() - 1 {
-                        input.store(best[cpu.frame_no()], Ordering::Relaxed);
-                        true
-                    } else {
-                        false
-                    }
-                });
-            }
-
-            generation += 1;
-        }
-    });
+    mario_trainer(&tx_frame, &frame_request, marios, &tx_inputs);
 
     thread::spawn(move || {
         let (controllers, input) = controller::Controllers::standard();
@@ -477,7 +292,7 @@ fn main() {
         let mut last: Vec<u8> = vec![];
 
         loop {
-            let mut best = rx_inputs.recv().unwrap();
+            let mut best: Vec<u8> = rx_inputs.recv().unwrap();
             while let Ok(inputs) = rx_inputs.try_recv() {
                 best = inputs;
             }
@@ -497,7 +312,7 @@ fn main() {
                 }
 
                 if !skip {
-                    tx_frame.send(Box::new(cpu.frame())).unwrap();
+                    tx_playback.send(Box::new(cpu.frame())).unwrap();
                     ::std::thread::sleep(Duration::new(0, 1_000_000_000u32 / 60));
                 }
             }
@@ -510,7 +325,7 @@ fn main() {
     let video_subsystem = sdl_context.video().unwrap();
 
     let window = video_subsystem
-        .window("fastnes", 256, 240)
+        .window("fastnes", 256 * 5, 240 * 4)
         .position_centered()
         .build()
         .unwrap();
@@ -521,28 +336,51 @@ fn main() {
     canvas.clear();
     canvas.present();
 
+    let texture_creator = canvas.texture_creator();
+
     let mut event_pump = sdl_context.event_pump().unwrap();
+    let mut frame = 0;
 
     'running: loop {
-        canvas.clear();
+        // canvas.clear();
 
-        let frame = match rx_frame.try_recv() {
-            Ok(frame) => frame,
-            Err(_) => {
-                frame_request.store(true, Ordering::Relaxed);
-                rx_frame.recv().unwrap()
-            }
-        };
+        // get training mario frames
+        let mut frames = Vec::new();
+        for _ in 0..marios + 1 {
+            frames.push(None);
+        }
 
-        for screen_y in 0..240 {
-            for screen_x in 0..256 {
-                let color = frame[screen_x + screen_y * 256];
-                canvas.set_draw_color(Color::RGB(color.r, color.g, color.b));
+        frame += 1;
+        frame_request.store(frame, Ordering::Relaxed);
+
+        while let Ok((mario, frame)) = rx_frame.try_recv() {
+            frames[mario + 1] = Some(frame);
+        }
+
+        while let Ok(frame) = rx_playback.try_recv() {
+            frames[0] = Some(frame);
+        }
+
+        for (idx, frame) in frames.iter().enumerate() {
+            if let Some(frame) = frame {
+                let mut texture = texture_creator
+                    .create_texture_streaming(Some(sdl2::pixels::PixelFormatEnum::RGB888), 256, 240)
+                    .unwrap();
+                texture
+                    .with_lock(None, |buf, _pitch| unsafe {
+                        buf.copy_from_slice(any_as_u8_slice(&(**frame)))
+                    })
+                    .unwrap();
+
+                let mut start_x = 256 * idx;
+                let mut start_y = 0;
+                while start_x >= 256 * 5 {
+                    start_x -= 256 * 4;
+                    start_y += 240;
+                }
+
                 canvas
-                    .draw_point(Point::new(
-                        screen_x.try_into().unwrap(),
-                        screen_y.try_into().unwrap(),
-                    ))
+                    .copy(&texture, None, Rect::new(start_x as i32, start_y, 256, 240))
                     .unwrap();
             }
         }
@@ -557,4 +395,205 @@ fn main() {
         canvas.present();
         ::std::thread::sleep(Duration::new(0, 1_000_000_000u32 / 60));
     }
+}
+
+struct MarioPool {
+    emus: emupool::EmuPool,
+    input_lists: Vec<Vec<u8>>,
+    last_best: u64,
+    reverts: usize,
+    stucks: usize,
+}
+
+fn mario_trainer(
+    tx_frame: &mpsc::Sender<(usize, Box<[ppu::Color; 61440]>)>,
+    frame_request: &Arc<AtomicUsize>,
+    marios: usize,
+    tx_inputs: &mpsc::Sender<Vec<u8>>,
+) {
+    let tx_inputs = tx_inputs.clone();
+    let tx_frame = tx_frame.clone();
+    let frame_request_cloned = Arc::clone(frame_request);
+    thread::spawn(move || -> ! {
+        let single_mario_run = 20;
+        let revert_time = 20;
+        let revert_after_stucks = 3;
+        let max_reverts = 5;
+
+        let mut pool = MarioPool {
+            emus: emupool::EmuPool::new(12, "rom/smb.nes", revert_time),
+            input_lists: vec![],
+            last_best: 0,
+            reverts: 1,
+            stucks: 0,
+        };
+
+        for _ in 0..marios {
+            pool.input_lists.push(vec![
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0b00001000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            ]);
+        }
+
+        let mut frame = 0;
+
+        loop {
+            let request = frame_request_cloned.load(Ordering::Relaxed);
+            let draw = request > frame;
+            frame = request;
+
+            let mut results = Vec::new();
+            for _ in 0..marios {
+                results.push((false, 0, false, false));
+            }
+
+            // train marios
+            let (tx, rx) = mpsc::channel();
+
+            for mario in 0..marios {
+                for _ in 0..single_mario_run {
+                    // add random inputs
+                    if mario == 0 {
+                        // mario 0 always repeats
+                        let last = *pool.input_lists[mario].last().unwrap();
+                        pool.input_lists[mario].push(last);
+                    } else if mario < marios / 2 {
+                        // random movement
+                        let input: u8 = rand::thread_rng().gen();
+                        pool.input_lists[mario].push(input & 0b11110011);
+                    } else {
+                        // flip one bit from last input
+                        let last = *pool.input_lists[mario].last().unwrap();
+                        let input: u8 = rand::thread_rng().gen_range(0..8);
+                        pool.input_lists[mario].push(last ^ ((1 << input) & 0b11110011));
+                    }
+                }
+
+                let inputs = pool.input_lists[mario].clone();
+                let tx = tx.clone();
+                let tx_frame = tx_frame.clone();
+                pool.emus.run(move |cpu, input| {
+                    if cpu.frame_no() < inputs.len() {
+                        input.store(inputs[cpu.frame_no()], Ordering::Relaxed);
+                        true
+                    } else {
+                        if draw {
+                            tx_frame.send((mario, Box::new(cpu.frame()))).unwrap();
+                        }
+
+                        let screen_left = u16::from(cpu.read(0x071a)) << 8 // screen page
+                    | u16::from(cpu.read(0x071c)); // screen x
+
+                        let mut score: u32 = 0;
+                        for i in 0..=5 {
+                            let digit = i;
+                            score *= 10;
+                            score += u32::from(cpu.read(0x07dd + digit));
+                        }
+
+                        let mario_position: u32 = u32::from(cpu.read(0x075f)) << 24
+                            | u32::from(cpu.read(0x0760)) << 16
+                            | u32::from(screen_left);
+
+                        let engine = cpu.read(0x0e);
+                        let task = cpu.read(0x0772);
+                        let mode = cpu.read(0x0770);
+
+                        let mario_y = u16::from(cpu.read(0xb5)) << 8 | u16::from(cpu.read(0xce));
+                        let cutscene =
+                            engine <= 5 || engine == 7 || mode == 2 || (mode == 1 && task != 3);
+                        let dying = (mario_y > 456
+                            || engine == 6
+                            || engine == 11
+                            || mode == 0
+                            || mode == 3)
+                            && !cutscene;
+
+                        let time = u16::from(cpu.read(0x07f8)) * 100
+                            + u16::from(cpu.read(0x07f9)) * 10
+                            + u16::from(cpu.read(0x07fa));
+
+                        let out_of_time = time < 30 && !cutscene;
+
+                        let fitness: u64 = u64::from(score) << 32 | u64::from(mario_position >> 2);
+
+                        tx.send((mario, fitness, cutscene, dying, out_of_time))
+                            .unwrap();
+
+                        false
+                    }
+                });
+            }
+
+            for _ in 0..marios {
+                let (mario, fitness, cutscene, dying, out_of_time) = rx.recv().unwrap();
+                results[mario] = (cutscene, fitness, dying, out_of_time);
+            }
+
+            // get best mario
+            let mut bests: Vec<_> = results.iter().cloned().enumerate().collect();
+            bests.sort_by_key(|(_, x)| if x.2 { (false, 0) } else { (x.0, x.1) });
+
+            let successful = bests.last().unwrap().0;
+            let best = pool.input_lists[successful].clone();
+
+            // check for any improvement
+            if results.iter().all(|x| x.3) {
+                pool.stucks += 400;
+            } else if results
+                .iter()
+                .all(|x| (x.1 <= pool.last_best || x.2) && !x.0)
+            {
+                pool.stucks += 1;
+            } else {
+                pool.stucks = 0;
+            }
+
+            if pool.stucks >= revert_after_stucks || results.iter().all(|x| x.2 && !x.0) {
+                pool.reverts += 1;
+
+                // reset last inputs
+                let amount = pool.reverts + pool.stucks;
+                for inputs in pool.input_lists.iter_mut() {
+                    for _ in 0..revert_time * amount {
+                        inputs.pop();
+                    }
+                }
+
+                for _ in 0..pool.reverts + pool.stucks {
+                    pool.emus.revert();
+                }
+
+                if pool.reverts >= max_reverts {
+                    pool.last_best = 0;
+                    pool.reverts = 1;
+                }
+
+                pool.stucks = 0;
+            } else {
+                pool.last_best = results[successful].1;
+                let best_inputs = pool.input_lists[bests.last().unwrap().0].clone();
+
+                // mario hivemind
+                for mario in 0..marios {
+                    pool.input_lists[mario] = best_inputs.clone();
+                }
+
+                tx_inputs.send(best_inputs).unwrap();
+
+                pool.emus.run_save(move |cpu, input| {
+                    if cpu.frame_no() < best.len() - 1 {
+                        input.store(best[cpu.frame_no()], Ordering::Relaxed);
+                        true
+                    } else {
+                        false
+                    }
+                });
+            }
+        }
+    });
 }
