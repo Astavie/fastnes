@@ -7,12 +7,12 @@
 
 extern crate test;
 
-mod cart;
-mod cpu;
-mod input;
-mod nes;
-mod pool;
-mod ppu;
+pub mod cart;
+pub mod cpu;
+pub mod input;
+pub mod nes;
+pub mod pool;
+pub mod ppu;
 
 #[cfg(test)]
 mod tests {
