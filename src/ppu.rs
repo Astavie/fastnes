@@ -1,6 +1,6 @@
 use enumset::{EnumSet, EnumSetType};
 
-use crate::{cartridge::Cartridge, cpu::DynCartridge};
+use crate::{cart::Cartridge, nes::DynCartridge};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Color {

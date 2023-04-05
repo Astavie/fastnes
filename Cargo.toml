@@ -3,6 +3,10 @@ name = "fastnes"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "fastnes"
+path = "src/lib.rs"
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
@@ -10,11 +14,3 @@ enumset = "1.0.12"
 rand = "0.8.5"
 repeated = "0.1.2"
 threadpool = "1.8.1"
-
-[dependencies.sdl2]
-version = "0.35.2"
-default-features = false
-features = ["ttf"]
-
-[profile.release]
-debug = 1

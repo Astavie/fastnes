@@ -1,38 +1,29 @@
 use threadpool::ThreadPool;
 
-use crate::{controller::Controllers, cpu::CPU, open_file, ppu::FastPPU};
+use crate::{input::Controllers, nes::NES, ppu::FastPPU};
 use std::sync::{atomic::AtomicU8, Arc, Mutex};
 
 pub struct EmuPool {
-    // emulators: Arc<Vec<Mutex<Box<(CPU, Arc<AtomicU8>)>>>>,
     pool: ThreadPool,
-    states: Arc<Mutex<Vec<CPU>>>,
+    states: Arc<Mutex<Vec<NES>>>,
     save_every: usize,
 }
 
 impl EmuPool {
     pub fn new(workers: usize, path: &str, save_every: usize) -> Self {
         let pool = ThreadPool::new(workers);
-        // let mut emulators = vec![];
-        // for _ in 0..workers {
-        // let (controllers, input) = Controllers::standard();
-        //     emulators.push(Mutex::new(Box::new((
-        //         open_file(path, controllers, FastPPU::new()),
-        //         input,
-        //     ))));
-        // }
         Self {
             // emulators: Arc::new(emulators),
             pool,
             save_every,
-            states: Arc::new(Mutex::new(vec![open_file(
+            states: Arc::new(Mutex::new(vec![NES::read_ines(
                 path,
                 Controllers::disconnected(),
                 FastPPU::new(),
             )])),
         }
     }
-    pub fn run(&self, mut f: impl FnMut(&mut CPU, &Arc<AtomicU8>) -> bool + Send + 'static) {
+    pub fn run(&self, mut f: impl FnMut(&mut NES, &Arc<AtomicU8>) -> bool + Send + 'static) {
         let states = Arc::clone(&self.states);
         self.pool.execute(move || {
             let (controllers, input) = Controllers::standard();
@@ -56,7 +47,7 @@ impl EmuPool {
             vec.pop();
         }
     }
-    pub fn run_save(&self, mut f: impl FnMut(&mut CPU, &Arc<AtomicU8>) -> bool + Send + 'static) {
+    pub fn run_save(&self, mut f: impl FnMut(&mut NES, &Arc<AtomicU8>) -> bool + Send + 'static) {
         let (controllers, input) = Controllers::standard();
 
         let mut vec = self.states.lock().unwrap();
