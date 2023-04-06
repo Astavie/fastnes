@@ -2,7 +2,7 @@ use enumset::{EnumSet, EnumSetType};
 
 use crate::{cart::Cartridge, nes::DynCartridge};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Color {
     pub b: u8,
     pub g: u8,
