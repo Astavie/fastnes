@@ -213,7 +213,7 @@ impl NES {
         }
     }
 
-    pub(crate) fn read(&mut self, addr: u16) -> u8 {
+    pub fn read(&mut self, addr: u16) -> u8 {
         self.open = match addr & 0xE000 {
             0x0000 => self.ram_internal[usize::from(addr & 0x07FF)],
             0x2000 => self.ppu.read(self.ppu_cycle, addr, &self.cart),
