@@ -175,7 +175,7 @@ enum PPUMASK {
 
 #[allow(non_snake_case)]
 #[derive(Clone)]
-pub(crate) struct FastPPU {
+pub struct FastPPU {
     open: u8,
 
     next_vbl: usize,

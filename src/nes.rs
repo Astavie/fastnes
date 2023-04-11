@@ -80,6 +80,12 @@ impl NES {
         let instr = INSTRUCTIONS[usize::from(op)];
         instr(self);
     }
+    pub fn next_frame(&mut self) {
+        let now = self.frame_no();
+        while self.frame_no() == now {
+            self.instruction();
+        }
+    }
     pub fn reset(&mut self) {
         self.res_sample = true;
         self.ppu_cycle = 0;
