@@ -17,10 +17,18 @@ pub trait PPU {
     fn nmi(&mut self, cycle: usize) -> bool;
     fn reset(&mut self);
 
-    fn frame(&self, cart: &DynCartridge) -> [Color; 61440]; // 256 * 240 pixels
+    fn frame(&self, cart: &DynCartridge, options: DrawOptions) -> [Color; 61440]; // 256 * 240 pixels
     fn frame_no(&mut self, cycle: usize) -> usize;
 
     fn clone(&self) -> Box<dyn PPU + Send>;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum DrawOptions {
+    #[default]
+    All,
+    Background,
+    Sprites,
 }
 
 pub(crate) struct DummyPPU;
@@ -36,7 +44,7 @@ impl PPU for DummyPPU {
     }
     fn reset(&mut self) {}
 
-    fn frame(&self, _cart: &DynCartridge) -> [Color; 61440] {
+    fn frame(&self, _cart: &DynCartridge, _options: DrawOptions) -> [Color; 61440] {
         [Color {
             r: 0,
             g: 0,
@@ -766,17 +774,29 @@ impl PPU for FastPPU {
         *self = Self::new();
     }
 
-    fn frame(&self, cart: &DynCartridge) -> [Color; 61440] {
-        let mut frame = [PALETTE[usize::from(self.palette_ram[0])]; 61440];
+    fn frame(&self, cart: &DynCartridge, options: DrawOptions) -> [Color; 61440] {
+        let sprites = options == DrawOptions::All || options == DrawOptions::Sprites;
+        let background = options == DrawOptions::All || options == DrawOptions::Background;
+
+        let mut frame = [if background {
+            PALETTE[usize::from(self.palette_ram[0])]
+        } else {
+            Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 0,
+            }
+        }; 61440];
 
         if let Some(cart) = cart {
-            if self.PPUMASK.contains(PPUMASK::ShowSprites) {
+            if sprites && self.PPUMASK.contains(PPUMASK::ShowSprites) {
                 self.draw_sprites(true, cart, &mut frame);
             }
-            if self.PPUMASK.contains(PPUMASK::ShowBackground) {
+            if background && self.PPUMASK.contains(PPUMASK::ShowBackground) {
                 self.draw_tiles(cart, &mut frame);
             }
-            if self.PPUMASK.contains(PPUMASK::ShowSprites) {
+            if sprites && self.PPUMASK.contains(PPUMASK::ShowSprites) {
                 self.draw_sprites(false, cart, &mut frame);
             }
         }

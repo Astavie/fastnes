@@ -4,7 +4,7 @@ use crate::{
     cart::{Cartridge, Mirroring, NROM},
     cpu::INSTRUCTIONS,
     input::Controllers,
-    ppu::{Color, PPU},
+    ppu::{Color, DrawOptions, PPU},
 };
 
 pub(crate) type DynCartridge = Option<Box<dyn Cartridge + Send>>;
@@ -120,8 +120,8 @@ impl NES {
     pub fn cycle(&self) -> usize {
         self.ppu_cycle / 3
     }
-    pub fn frame(&self) -> [Color; 61440] {
-        self.ppu.frame(&self.cart)
+    pub fn frame(&self, options: DrawOptions) -> [Color; 61440] {
+        self.ppu.frame(&self.cart, options)
     }
     pub fn frame_no(&mut self) -> usize {
         self.ppu.frame_no(self.ppu_cycle)
