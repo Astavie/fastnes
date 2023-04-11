@@ -4,9 +4,9 @@ use crate::{cart::Cartridge, nes::DynCartridge};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Color {
-    pub b: u8,
-    pub g: u8,
     pub r: u8,
+    pub g: u8,
+    pub b: u8,
     pub a: u8,
 }
 
