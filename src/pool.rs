@@ -26,10 +26,10 @@ impl EmuPool {
     pub fn run(&self, mut f: impl FnMut(&mut NES, &Arc<AtomicU8>) -> bool + Send + 'static) {
         let states = Arc::clone(&self.states);
         self.pool.execute(move || {
-            let (controllers, input) = Controllers::standard();
-
             let mut cpu = states.lock().unwrap().last().unwrap().clone();
-            cpu.set_controllers(controllers);
+
+            let input = Arc::new(AtomicU8::new(0));
+            cpu.set_controllers(Controllers::standard(&input));
 
             for frame in cpu.frame_no().. {
                 if !f(&mut cpu, &input) {
@@ -48,11 +48,11 @@ impl EmuPool {
         }
     }
     pub fn run_save(&self, mut f: impl FnMut(&mut NES, &Arc<AtomicU8>) -> bool + Send + 'static) {
-        let (controllers, input) = Controllers::standard();
-
         let mut vec = self.states.lock().unwrap();
         let mut cpu = vec.pop().unwrap();
-        cpu.set_controllers(controllers);
+
+        let input = Arc::new(AtomicU8::new(0));
+        cpu.set_controllers(Controllers::standard(&input));
 
         let start = cpu.frame_no();
         for frame in start.. {

@@ -19,20 +19,16 @@ impl Controllers {
         self.left.write(data);
         self.right.write(data);
     }
-    pub fn standard() -> (Controllers, Arc<AtomicU8>) {
-        let input = Arc::new(AtomicU8::new(0));
+    pub fn standard(input: &Arc<AtomicU8>) -> Controllers {
         let left = StandardController {
-            input: Arc::clone(&input),
+            input: Arc::clone(input),
             shift: None,
         };
         let right = Unconnected;
-        (
-            Controllers {
-                left: Box::new(left),
-                right: Box::new(right),
-            },
-            input,
-        )
+        Controllers {
+            left: Box::new(left),
+            right: Box::new(right),
+        }
     }
     pub fn disconnected() -> Controllers {
         Controllers {
