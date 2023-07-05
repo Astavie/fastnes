@@ -3,7 +3,6 @@
 #![feature(adt_const_params)]
 #![feature(generic_const_exprs)]
 #![feature(const_mut_refs)]
-#![feature(is_some_and)]
 
 extern crate test;
 

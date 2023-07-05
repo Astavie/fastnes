@@ -1,6 +1,7 @@
 use crate::nes::NES;
 use repeated::repeated;
 use std::fmt::Debug;
+use std::marker::ConstParamTy;
 
 pub type Instruction = fn(&mut NES);
 pub type Instructions = [Instruction; 256];
@@ -443,7 +444,7 @@ impl Micro {
         }
     }
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ConstParamTy)]
 pub enum Micro {
     // legal
     ASL,
@@ -514,7 +515,7 @@ pub enum Micro {
     LXA,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ConstParamTy)]
 pub enum Index {
     X,
     Y,
@@ -531,7 +532,7 @@ impl Index {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ConstParamTy)]
 pub enum Mode {
     Accumulator,
     Implied,
