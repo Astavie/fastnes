@@ -12,7 +12,6 @@ pub(crate) type DynCartridge = Option<Box<dyn Cartridge + Send>>;
 #[allow(non_snake_case)]
 pub struct NES {
     // memory
-    rom_cache: [u8; 0x8000],
     ram_internal: [u8; 0x0800],
     open: u8,
 
@@ -44,7 +43,6 @@ pub struct NES {
 impl Clone for NES {
     fn clone(&self) -> Self {
         Self {
-            rom_cache: self.rom_cache,
             ram_internal: self.ram_internal,
             open: self.open,
             PC: self.PC,
@@ -113,7 +111,6 @@ impl NES {
             hardware_interrupt: false,
             controllers,
             open: 0,
-            rom_cache: cart.cache_prg_rom(),
             cart: Some(Box::new(cart)),
         }
     }
@@ -156,6 +153,49 @@ impl NES {
         let mut cpu = Self::new(cartridge, controllers, ppu);
         cpu.reset();
         cpu
+    }
+
+    pub fn read_internal(&self, addr: u16) -> u8 {
+        self.ram_internal[usize::from(addr & 0x07FF)]
+    }
+
+    pub fn read(&mut self, addr: u16) -> u8 {
+        self.open = match addr & 0xE000 {
+            0x0000 => self.read_internal(addr),
+            0x2000 => self.ppu.read(self.ppu_cycle, addr, &self.cart),
+            0x4000 => self.read_apu(addr),
+            0x6000 => self
+                .cart
+                .as_ref()
+                .map(|c| c.read_prg_ram(addr))
+                .flatten()
+                .unwrap_or(self.open),
+            _ => self
+                .cart
+                .as_ref()
+                .map(|c| c.read_prg_rom(addr))
+                .flatten()
+                .unwrap_or(self.open),
+        };
+        self.open
+    }
+
+    pub fn write(&mut self, addr: u16, data: u8) {
+        match addr & 0xE000 {
+            0x0000 => self.ram_internal[usize::from(addr & 0x07FF)] = data,
+            0x2000 => self.ppu.write(self.ppu_cycle, addr, data, &mut self.cart),
+            0x4000 => self.write_apu(addr, data),
+            0x6000 => {
+                if let Some(cart) = self.cart.as_mut() {
+                    cart.write_prg_ram(addr, data);
+                }
+            }
+            _ => {
+                if let Some(cart) = self.cart.as_mut() {
+                    cart.write_prg_rom(addr, data);
+                }
+            }
+        }
     }
 
     // HELPER FUNCTIONS
@@ -212,26 +252,6 @@ impl NES {
             }
         }
     }
-
-    pub fn read(&mut self, addr: u16) -> u8 {
-        self.open = match addr & 0xE000 {
-            0x0000 => self.ram_internal[usize::from(addr & 0x07FF)],
-            0x2000 => self.ppu.read(self.ppu_cycle, addr, &self.cart),
-            0x4000 => self.read_apu(addr),
-            0x6000 => self
-                .cart
-                .as_mut()
-                .map(|c| c.read_prg_ram(addr))
-                .flatten()
-                .unwrap_or(self.open),
-            _ => self
-                .cart
-                .as_ref()
-                .map(|_| self.rom_cache[usize::from(addr & 0x7FFF)])
-                .unwrap_or(self.open),
-        };
-        self.open
-    }
     pub(crate) fn poll(&mut self) {
         // sample irq and nmi (nmi stays on while irq gets reset every cycle)
         // self.irq_sample = self.irq > 0;
@@ -263,21 +283,7 @@ impl NES {
     pub(crate) fn write_addr(&mut self, addr: u16, data: u8) {
         if !self.res_sample {
             self.ppu_cycle += 3;
-            match addr & 0xE000 {
-                0x0000 => self.ram_internal[usize::from(addr & 0x07FF)] = data,
-                0x2000 => self.ppu.write(self.ppu_cycle, addr, data, &mut self.cart),
-                0x4000 => self.write_apu(addr, data),
-                0x6000 => {
-                    if let Some(cart) = self.cart.as_mut() {
-                        cart.write_prg_ram(addr, data);
-                    }
-                }
-                _ => {
-                    if let Some(cart) = self.cart.as_mut() {
-                        cart.write_prg_rom(addr, data, &mut self.rom_cache);
-                    }
-                }
-            }
+            self.write(addr, data);
         } else {
             self.read_addr(addr);
         }

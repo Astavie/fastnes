@@ -1,12 +1,14 @@
-pub trait Cartridge {
-    fn read_chr(&self, addr: u16) -> u8;
-    fn write_chr(&mut self, addr: u16, data: u8);
+use std::sync::Arc;
 
-    fn cache_prg_rom(&self) -> [u8; 0x8000];
-    fn write_prg_rom(&mut self, addr: u16, data: u8, cache: &mut [u8; 0x8000]);
+pub trait Cartridge {
+    fn read_prg_rom(&self, addr: u16) -> Option<u8>;
+    fn write_prg_rom(&mut self, addr: u16, data: u8);
 
     fn read_prg_ram(&self, addr: u16) -> Option<u8>;
     fn write_prg_ram(&mut self, addr: u16, data: u8);
+
+    fn read_chr(&self, addr: u16) -> u8;
+    fn write_chr(&mut self, addr: u16, data: u8);
 
     fn read_nametable(&self, addr: u16) -> u8;
     fn write_nametable(&mut self, addr: u16, data: u8);
@@ -73,10 +75,16 @@ impl MirroredNametable {
 
 #[derive(Clone)]
 pub struct NROM {
+    // these are reado-only and can be shared among cartridges of the same game
+    chr: Arc<[u8; 0x2000]>,
+    rom: Arc<[u8; 0x8000]>,
+
+    // technically the data is stored on the NES itself but we store it here for convenience
     nametable: MirroredNametable,
-    chr: [u8; 0x2000],
-    ram: [u8; 0x2000], // not included on hardware but some emulator tests use it
-    rom: [u8; 0x8000],
+
+    // ram is not included on hardware but some emulator tests use it
+    // to save memory when unused we store it optionally on the heap
+    ram: Option<Box<[u8; 0x2000]>>,
 }
 
 fn concat<const A: usize, const B: usize>(a: [u8; A], b: [u8; B]) -> [u8; A + B] {
@@ -90,17 +98,17 @@ impl NROM {
     pub fn new_256(mirroring: Mirroring, chr: [u8; 0x2000], rom: [u8; 0x8000]) -> Self {
         Self {
             nametable: MirroredNametable::new(mirroring),
-            ram: [0; 0x2000],
-            rom,
-            chr,
+            ram: None,
+            rom: Arc::new(rom),
+            chr: Arc::new(chr),
         }
     }
     pub fn new_128(mirroring: Mirroring, chr: [u8; 0x2000], rom: [u8; 0x4000]) -> Self {
         Self {
             nametable: MirroredNametable::new(mirroring),
-            ram: [0; 0x2000],
-            rom: concat(rom, rom),
-            chr,
+            ram: None,
+            rom: Arc::new(concat(rom, rom)),
+            chr: Arc::new(chr),
         }
     }
 }
@@ -122,20 +130,23 @@ impl Cartridge for NROM {
         self.nametable.write(addr, data)
     }
 
-    fn cache_prg_rom(&self) -> [u8; 0x8000] {
-        self.rom
-    }
-
-    fn write_prg_rom(&mut self, _addr: u16, _data: u8, _cache: &mut [u8; 0x8000]) {
-        // Cannot write to PRG ROM
-    }
-
     fn read_prg_ram(&self, addr: u16) -> Option<u8> {
-        Some(self.ram[usize::from(addr & 0x1FFF)])
+        // return open bus if PRGRAM is uninitialized
+        self.ram.as_ref().map(|ram| ram[usize::from(addr & 0x1FFF)])
     }
 
     fn write_prg_ram(&mut self, addr: u16, data: u8) {
-        self.ram[usize::from(addr & 0x1FFF)] = data;
+        // if PRGRAM appears to be used,
+        // we simply create it on the fly
+        self.ram.get_or_insert_with(|| Box::new([0; 0x2000]))[usize::from(addr & 0x1FFF)] = data;
+    }
+
+    fn read_prg_rom(&self, addr: u16) -> Option<u8> {
+        Some(self.rom[usize::from(addr & 0x7FFF)])
+    }
+
+    fn write_prg_rom(&mut self, _addr: u16, _data: u8) {
+        // Cannot write to PRG ROM
     }
 
     fn clone(&self) -> Box<dyn Cartridge + Send> {

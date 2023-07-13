@@ -10,7 +10,6 @@ pub mod cart;
 pub mod cpu;
 pub mod input;
 pub mod nes;
-pub mod pool;
 pub mod ppu;
 
 #[cfg(test)]
