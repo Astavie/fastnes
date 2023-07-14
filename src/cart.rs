@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-pub trait Cartridge {
+pub trait Cartridge: Clone {
     fn read_prg_rom(&self, addr: u16) -> Option<u8>;
     fn write_prg_rom(&mut self, addr: u16, data: u8);
 
@@ -12,8 +12,93 @@ pub trait Cartridge {
 
     fn read_nametable(&self, addr: u16) -> u8;
     fn write_nametable(&mut self, addr: u16, data: u8);
+}
 
-    fn clone(&self) -> Box<dyn Cartridge + Send>;
+#[derive(Clone)]
+pub struct Empty;
+
+impl Cartridge for Empty {
+    fn read_prg_rom(&self, addr: u16) -> Option<u8> {
+        None
+    }
+    fn read_prg_ram(&self, addr: u16) -> Option<u8> {
+        None
+    }
+    fn read_chr(&self, addr: u16) -> u8 {
+        0
+    }
+    fn read_nametable(&self, addr: u16) -> u8 {
+        0
+    }
+
+    fn write_prg_rom(&mut self, addr: u16, data: u8) {}
+    fn write_prg_ram(&mut self, addr: u16, data: u8) {}
+    fn write_chr(&mut self, addr: u16, data: u8) {}
+    fn write_nametable(&mut self, addr: u16, data: u8) {}
+}
+
+#[derive(Clone)]
+pub enum CartridgeEnum {
+    Empty,
+    NROM(NROM),
+}
+
+impl Cartridge for CartridgeEnum {
+    fn read_prg_rom(&self, addr: u16) -> Option<u8> {
+        match self {
+            Self::Empty => None,
+            Self::NROM(n) => n.read_prg_rom(addr),
+        }
+    }
+
+    fn write_prg_rom(&mut self, addr: u16, data: u8) {
+        match self {
+            Self::Empty => (),
+            Self::NROM(n) => n.write_prg_rom(addr, data),
+        }
+    }
+
+    fn read_prg_ram(&self, addr: u16) -> Option<u8> {
+        match self {
+            Self::Empty => None,
+            Self::NROM(n) => n.read_prg_ram(addr),
+        }
+    }
+
+    fn write_prg_ram(&mut self, addr: u16, data: u8) {
+        match self {
+            Self::Empty => (),
+            Self::NROM(n) => n.write_prg_ram(addr, data),
+        }
+    }
+
+    fn read_chr(&self, addr: u16) -> u8 {
+        match self {
+            Self::Empty => 0,
+            Self::NROM(n) => n.read_chr(addr),
+        }
+    }
+
+    fn write_chr(&mut self, addr: u16, data: u8) {
+        match self {
+            Self::Empty => (),
+            Self::NROM(n) => n.write_chr(addr, data),
+        }
+    }
+
+    fn read_nametable(&self, addr: u16) -> u8 {
+        match self {
+            Self::Empty => 0,
+            Self::NROM(n) => n.read_nametable(addr),
+        }
+    }
+
+    fn write_nametable(&mut self, addr: u16, data: u8) {
+        match self {
+            Self::Empty => (),
+            Self::NROM(n) => n.write_nametable(addr, data),
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -147,9 +232,5 @@ impl Cartridge for NROM {
 
     fn write_prg_rom(&mut self, _addr: u16, _data: u8) {
         // Cannot write to PRG ROM
-    }
-
-    fn clone(&self) -> Box<dyn Cartridge + Send> {
-        Box::new(Clone::clone(self))
     }
 }

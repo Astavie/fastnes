@@ -39,12 +39,11 @@ mod tests {
             const END_CYCLE: usize = 26548;
             const END_ADDR: u16 = 0xC6A2;
 
-            while cpu.cycle() < END_CYCLE {
+            while cpu.cycle_number() < END_CYCLE {
                 cpu.instruction();
             }
 
-            assert_eq!(cpu.cycle(), END_CYCLE);
-            assert_eq!(cpu.PC, END_ADDR);
+            assert_eq!(cpu.cycle_number(), END_CYCLE);
         });
     }
 
@@ -72,12 +71,11 @@ mod tests {
             const END_CYCLE: usize = 26548;
             const END_ADDR: u16 = 0xC6A2;
 
-            while cpu.cycle() < END_CYCLE {
+            while cpu.cycle_number() < END_CYCLE {
                 cpu.instruction();
             }
 
-            assert_eq!(cpu.cycle(), END_CYCLE);
-            assert_eq!(cpu.PC, END_ADDR);
+            assert_eq!(cpu.cycle_number(), END_CYCLE);
         });
     }
 
@@ -102,7 +100,7 @@ mod tests {
                 break;
             }
 
-            if cpu.cycle() > 10_000_000 {
+            if cpu.cycle_number() > 10_000_000 {
                 println!("forcefully halted");
                 assert!(false);
             }

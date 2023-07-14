@@ -1,6 +1,6 @@
 use enumset::{EnumSet, EnumSetType};
 
-use crate::{cart::Cartridge, nes::DynCartridge};
+use crate::cart::Cartridge;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Color {
@@ -10,17 +10,15 @@ pub struct Color {
     pub a: u8,
 }
 
-pub trait PPU {
-    fn write(&mut self, cycle: usize, addr: u16, data: u8, cart: &mut DynCartridge);
-    fn read(&mut self, cycle: usize, addr: u16, cart: &DynCartridge) -> u8;
+pub trait PPU: Clone {
+    fn write(&mut self, cycle: usize, addr: u16, data: u8, cart: &mut impl Cartridge);
+    fn read(&mut self, cycle: usize, addr: u16, cart: &impl Cartridge) -> u8;
 
     fn nmi(&mut self, cycle: usize) -> bool;
     fn reset(&mut self);
 
-    fn frame(&self, cart: &DynCartridge, options: DrawOptions) -> [Color; 61440]; // 256 * 240 pixels
-    fn frame_no(&mut self, cycle: usize) -> usize;
-
-    fn clone(&self) -> Box<dyn PPU + Send>;
+    fn frame(&self, cart: &impl Cartridge, options: DrawOptions) -> [Color; 61440]; // 256 * 240 pixels
+    fn frame_number(&mut self, cycle: usize) -> usize;
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -31,11 +29,12 @@ pub enum DrawOptions {
     Sprites,
 }
 
+#[derive(Clone)]
 pub(crate) struct DummyPPU;
 
 impl PPU for DummyPPU {
-    fn write(&mut self, _cycle: usize, _addr: u16, _data: u8, _cart: &mut DynCartridge) {}
-    fn read(&mut self, _cycle: usize, _addr: u16, _cart: &DynCartridge) -> u8 {
+    fn write(&mut self, _cycle: usize, _addr: u16, _data: u8, _cart: &mut impl Cartridge) {}
+    fn read(&mut self, _cycle: usize, _addr: u16, _cart: &impl Cartridge) -> u8 {
         0
     }
 
@@ -44,7 +43,7 @@ impl PPU for DummyPPU {
     }
     fn reset(&mut self) {}
 
-    fn frame(&self, _cart: &DynCartridge, _options: DrawOptions) -> [Color; 61440] {
+    fn frame(&self, _cart: &impl Cartridge, _options: DrawOptions) -> [Color; 61440] {
         [Color {
             r: 0,
             g: 0,
@@ -52,12 +51,8 @@ impl PPU for DummyPPU {
             a: 255,
         }; 61440]
     }
-    fn frame_no(&mut self, _cycle: usize) -> usize {
+    fn frame_number(&mut self, _cycle: usize) -> usize {
         0
-    }
-
-    fn clone(&self) -> Box<dyn PPU + Send> {
-        Box::new(DummyPPU)
     }
 }
 
@@ -266,7 +261,7 @@ impl FastPPU {
         // end vblank after 20 scanlines
         self.vbl_started = self.vbl_started.filter(|i| cycle <= i + 20 * SCANLINE);
     }
-    fn next_sprite_0(&mut self, cycle: usize, cart: &DynCartridge) {
+    fn next_sprite_0(&mut self, cycle: usize, cart: &impl Cartridge) {
         // check if previous sprite0 check was still this frame
         self.next_sprite_0 = self.next_sprite_0.filter(|i| {
             *i >= self
@@ -281,128 +276,120 @@ impl FastPPU {
             && self.PPUMASK.contains(PPUMASK::ShowBackground)
             && self.PPUMASK.contains(PPUMASK::ShowSprites)
         {
-            if let Some(cart) = cart {
-                let frame_start = self
-                    .vbl_started
-                    .filter(|i| cycle < i + 20 * SCANLINE)
-                    .unwrap_or(self.next_vbl)
-                    - 241 * SCANLINE
-                    + 1;
+            let frame_start = self
+                .vbl_started
+                .filter(|i| cycle < i + 20 * SCANLINE)
+                .unwrap_or(self.next_vbl)
+                - 241 * SCANLINE
+                + 1;
 
-                let x = self.OAM[3];
-                let y = self.OAM[0];
+            let x = self.OAM[3];
+            let y = self.OAM[0];
 
-                let tile = self.OAM[1];
-                let flip_hor = self.OAM[2] & 0b01000000 != 0;
-                let flip_ver = self.OAM[2] & 0b10000000 != 0;
+            let tile = self.OAM[1];
+            let flip_hor = self.OAM[2] & 0b01000000 != 0;
+            let flip_ver = self.OAM[2] & 0b10000000 != 0;
 
-                let pattern_addr = match self.sprite_size {
-                    SpriteSize::Single => self.sprite_table.addr() + u16::from(tile) * 16,
-                    SpriteSize::Double => {
-                        (u16::from(tile & 1) * 0x1000) + u16::from(tile & 0b11111110) * 16
+            let pattern_addr = match self.sprite_size {
+                SpriteSize::Single => self.sprite_table.addr() + u16::from(tile) * 16,
+                SpriteSize::Double => {
+                    (u16::from(tile & 1) * 0x1000) + u16::from(tile & 0b11111110) * 16
+                }
+            };
+
+            let height = match self.sprite_size {
+                SpriteSize::Single => 8,
+                SpriteSize::Double => 16,
+            };
+
+            let nametable = self.nametable.addr();
+
+            for ypos in 0..height {
+                for xpos in 0..8 {
+                    let screen_x = u16::from(x) + xpos as u16;
+                    let screen_y = u16::from(y) + 1 + ypos as u16;
+
+                    // check if off the screen
+                    if screen_x < 8
+                        && (!self.PPUMASK.contains(PPUMASK::ShowBackgroundLeft)
+                            || !self.PPUMASK.contains(PPUMASK::ShowSpritesLeft))
+                    {
+                        continue;
                     }
-                };
 
-                let height = match self.sprite_size {
-                    SpriteSize::Single => 8,
-                    SpriteSize::Double => 16,
-                };
-
-                let nametable = self.nametable.addr();
-
-                for ypos in 0..height {
-                    for xpos in 0..8 {
-                        let screen_x = u16::from(x) + xpos as u16;
-                        let screen_y = u16::from(y) + 1 + ypos as u16;
-
-                        // check if off the screen
-                        if screen_x < 8
-                            && (!self.PPUMASK.contains(PPUMASK::ShowBackgroundLeft)
-                                || !self.PPUMASK.contains(PPUMASK::ShowSpritesLeft))
-                        {
-                            continue;
-                        }
-
-                        if screen_x >= 255 || screen_y >= 240 {
-                            continue;
-                        }
-
-                        // check if after last cycle
-                        let dot_cycle =
-                            frame_start + usize::from(screen_y) * SCANLINE + usize::from(screen_x);
-
-                        if dot_cycle <= self.last_cycle {
-                            continue;
-                        }
-
-                        // get if opaque
-                        let sprite_x: u8 = if flip_hor { 7 - xpos } else { xpos };
-                        let sprite_y: u8 = if flip_ver { height - 1 - ypos } else { ypos };
-
-                        let pattern_addr = if sprite_y >= 8 {
-                            pattern_addr + u16::from(sprite_y) + 8
-                        } else {
-                            pattern_addr + u16::from(sprite_y)
-                        };
-
-                        let color_lo = (cart.read_chr(pattern_addr) >> (7 - sprite_x)) & 1;
-                        let color_hi = (cart.read_chr(pattern_addr + 8) >> (7 - sprite_x)) & 1;
-                        let color_indx = color_lo | (color_hi << 1);
-
-                        if color_indx == 0 {
-                            continue;
-                        }
-
-                        // get if tile underneath is opaque
-                        let mut x = screen_x + u16::from(self.scroll_x);
-                        let mut y = screen_y + u16::from(self.scroll_y);
-                        let mut nametable = nametable;
-
-                        if x >= 256 {
-                            // nametable to the right
-                            x -= 256;
-                            nametable += 0x400;
-                        }
-
-                        if y >= 240 {
-                            // nametable to the bottom
-                            y -= 240;
-                            nametable += 0x800;
-                        }
-
-                        let tile_addr = nametable + (x / 8) + (y / 8) * 32;
-                        let tile = cart.read_nametable(tile_addr);
-
-                        let tile_x = x & 7;
-                        let tile_y = y & 7;
-
-                        let pattern_addr =
-                            self.background_table.addr() + u16::from(tile) * 16 + tile_y;
-
-                        let color_lo = (cart.read_chr(pattern_addr) >> (7 - tile_x)) & 1;
-                        let color_hi = (cart.read_chr(pattern_addr + 8) >> (7 - tile_x)) & 1;
-                        let color_indx = color_lo | (color_hi << 1);
-
-                        if color_indx == 0 {
-                            continue;
-                        }
-
-                        // sprite 0 hit!
-                        self.next_sprite_0 = Some(dot_cycle);
-                        return;
+                    if screen_x >= 255 || screen_y >= 240 {
+                        continue;
                     }
+
+                    // check if after last cycle
+                    let dot_cycle =
+                        frame_start + usize::from(screen_y) * SCANLINE + usize::from(screen_x);
+
+                    if dot_cycle <= self.last_cycle {
+                        continue;
+                    }
+
+                    // get if opaque
+                    let sprite_x: u8 = if flip_hor { 7 - xpos } else { xpos };
+                    let sprite_y: u8 = if flip_ver { height - 1 - ypos } else { ypos };
+
+                    let pattern_addr = if sprite_y >= 8 {
+                        pattern_addr + u16::from(sprite_y) + 8
+                    } else {
+                        pattern_addr + u16::from(sprite_y)
+                    };
+
+                    let color_lo = (cart.read_chr(pattern_addr) >> (7 - sprite_x)) & 1;
+                    let color_hi = (cart.read_chr(pattern_addr + 8) >> (7 - sprite_x)) & 1;
+                    let color_indx = color_lo | (color_hi << 1);
+
+                    if color_indx == 0 {
+                        continue;
+                    }
+
+                    // get if tile underneath is opaque
+                    let mut x = screen_x + u16::from(self.scroll_x);
+                    let mut y = screen_y + u16::from(self.scroll_y);
+                    let mut nametable = nametable;
+
+                    if x >= 256 {
+                        // nametable to the right
+                        x -= 256;
+                        nametable += 0x400;
+                    }
+
+                    if y >= 240 {
+                        // nametable to the bottom
+                        y -= 240;
+                        nametable += 0x800;
+                    }
+
+                    let tile_addr = nametable + (x / 8) + (y / 8) * 32;
+                    let tile = cart.read_nametable(tile_addr);
+
+                    let tile_x = x & 7;
+                    let tile_y = y & 7;
+
+                    let pattern_addr = self.background_table.addr() + u16::from(tile) * 16 + tile_y;
+
+                    let color_lo = (cart.read_chr(pattern_addr) >> (7 - tile_x)) & 1;
+                    let color_hi = (cart.read_chr(pattern_addr + 8) >> (7 - tile_x)) & 1;
+                    let color_indx = color_lo | (color_hi << 1);
+
+                    if color_indx == 0 {
+                        continue;
+                    }
+
+                    // sprite 0 hit!
+                    self.next_sprite_0 = Some(dot_cycle);
+                    return;
                 }
             }
             self.last_cycle = cycle;
         }
     }
 
-    fn draw_sprites(
-        &self,
-        background: bool,
-        cart: &Box<dyn Cartridge + Send>,
-        frame: &mut [Color],
-    ) {
+    fn draw_sprites(&self, background: bool, cart: &impl Cartridge, frame: &mut [Color]) {
         for sprite in 0..64 {
             let data = &self.OAM[sprite * 4..];
 
@@ -484,7 +471,7 @@ impl FastPPU {
         }
     }
 
-    fn draw_tiles(&self, cart: &Box<dyn Cartridge + Send>, frame: &mut [Color]) {
+    fn draw_tiles(&self, cart: &impl Cartridge, frame: &mut [Color]) {
         let nametable = self.nametable.addr();
 
         let x_start = if self.PPUMASK.contains(PPUMASK::ShowBackgroundLeft) {
@@ -556,7 +543,7 @@ fn on_change(var: &mut bool, val: bool) -> Option<bool> {
 }
 
 impl PPU for FastPPU {
-    fn write(&mut self, cycle: usize, addr: u16, data: u8, cart: &mut DynCartridge) {
+    fn write(&mut self, cycle: usize, addr: u16, data: u8, cart: &mut impl Cartridge) {
         self.sync(cycle);
 
         self.open = data;
@@ -678,7 +665,7 @@ impl PPU for FastPPU {
                         self.palette_ram[0x18] = self.palette_ram[0x08];
                         self.palette_ram[0x1C] = self.palette_ram[0x0C];
                     }
-                } else if let Some(cart) = cart.as_mut() {
+                } else {
                     match addr & 0x2000 {
                         // pattern table
                         0x0000 => cart.write_chr(addr, data),
@@ -703,7 +690,7 @@ impl PPU for FastPPU {
         // self.next_sprite_0(cycle, cart);
     }
 
-    fn read(&mut self, cycle: usize, addr: u16, cart: &DynCartridge) -> u8 {
+    fn read(&mut self, cycle: usize, addr: u16, cart: &impl Cartridge) -> u8 {
         match addr & 7 {
             // PPUSTATUS
             2 => {
@@ -740,17 +727,15 @@ impl PPU for FastPPU {
                 };
 
                 // reading PPUDATA *always* updates the internal buffer
-                if let Some(cart) = cart {
-                    self.PPUDATA = match addr & 0x2000 {
-                        // pattern table
-                        0x0000 => cart.read_chr(addr),
+                self.PPUDATA = match addr & 0x2000 {
+                    // pattern table
+                    0x0000 => cart.read_chr(addr),
 
-                        // nametable
-                        0x2000 => cart.read_nametable(addr),
+                    // nametable
+                    0x2000 => cart.read_nametable(addr),
 
-                        _ => unreachable!(),
-                    }
-                }
+                    _ => unreachable!(),
+                };
 
                 // increment PPUADDR
                 self.vram_direction.increment(&mut self.v);
@@ -774,7 +759,7 @@ impl PPU for FastPPU {
         *self = Self::new();
     }
 
-    fn frame(&self, cart: &DynCartridge, options: DrawOptions) -> [Color; 61440] {
+    fn frame(&self, cart: &impl Cartridge, options: DrawOptions) -> [Color; 61440] {
         let sprites = options == DrawOptions::All || options == DrawOptions::Sprites;
         let background = options == DrawOptions::All || options == DrawOptions::Background;
 
@@ -789,28 +774,22 @@ impl PPU for FastPPU {
             }
         }; 61440];
 
-        if let Some(cart) = cart {
-            if sprites && self.PPUMASK.contains(PPUMASK::ShowSprites) {
-                self.draw_sprites(true, cart, &mut frame);
-            }
-            if background && self.PPUMASK.contains(PPUMASK::ShowBackground) {
-                self.draw_tiles(cart, &mut frame);
-            }
-            if sprites && self.PPUMASK.contains(PPUMASK::ShowSprites) {
-                self.draw_sprites(false, cart, &mut frame);
-            }
+        if sprites && self.PPUMASK.contains(PPUMASK::ShowSprites) {
+            self.draw_sprites(true, cart, &mut frame);
+        }
+        if background && self.PPUMASK.contains(PPUMASK::ShowBackground) {
+            self.draw_tiles(cart, &mut frame);
+        }
+        if sprites && self.PPUMASK.contains(PPUMASK::ShowSprites) {
+            self.draw_sprites(false, cart, &mut frame);
         }
 
         frame
     }
 
-    fn frame_no(&mut self, cycle: usize) -> usize {
+    fn frame_number(&mut self, cycle: usize) -> usize {
         self.sync(cycle);
         self.frame
-    }
-
-    fn clone(&self) -> Box<dyn PPU + Send> {
-        Box::new(Clone::clone(self))
     }
 }
 

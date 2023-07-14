@@ -4,8 +4,8 @@ use std::sync::{
 };
 
 pub struct Controllers {
-    left: Box<dyn Controller + Send>,
-    right: Box<dyn Controller + Send>,
+    pub left: Box<dyn Controller + Send>,
+    pub right: Box<dyn Controller + Send>,
 }
 
 impl Controllers {
@@ -38,7 +38,7 @@ impl Controllers {
     }
 }
 
-trait Controller {
+pub trait Controller {
     fn read(&mut self, open: u8) -> u8;
     fn write(&mut self, data: u8);
 }
