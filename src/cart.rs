@@ -18,88 +18,88 @@ pub trait Cartridge: Clone {
 pub struct Empty;
 
 impl Cartridge for Empty {
-    fn read_prg_rom(&self, addr: u16) -> Option<u8> {
-        None
-    }
-    fn read_prg_ram(&self, addr: u16) -> Option<u8> {
-        None
-    }
-    fn read_chr(&self, addr: u16) -> u8 {
-        0
-    }
-    fn read_nametable(&self, addr: u16) -> u8 {
-        0
-    }
+    fn read_prg_rom(&self, _addr: u16) -> Option<u8> { None }
+    fn read_prg_ram(&self, _addr: u16) -> Option<u8> { None }
+    fn read_chr(&self, _addr: u16) -> u8 { 0 }
+    fn read_nametable(&self, _addr: u16) -> u8 { 0 }
 
-    fn write_prg_rom(&mut self, addr: u16, data: u8) {}
-    fn write_prg_ram(&mut self, addr: u16, data: u8) {}
-    fn write_chr(&mut self, addr: u16, data: u8) {}
-    fn write_nametable(&mut self, addr: u16, data: u8) {}
+    fn write_prg_rom(&mut self, _addr: u16, _dataa: u8) {}
+    fn write_prg_ram(&mut self, _addr: u16, _dataa: u8) {}
+    fn write_chr(&mut self, _addr: u16, _dataa: u8) {}
+    fn write_nametable(&mut self, _addr: u16, _dataa: u8) {}
 }
 
-#[derive(Clone)]
-pub enum CartridgeEnum {
-    Empty,
-    NROM(NROM),
+macro_rules! generate_cartridge_enum {
+    (
+        $($mapper: ident),*
+    ) => {
+        #[derive(Clone)]
+        pub enum CartridgeEnum {
+            Empty,
+            $($mapper($mapper),)*
+        }
+
+        impl Cartridge for CartridgeEnum {
+            fn read_prg_rom(&self, addr: u16) -> Option<u8> {
+                match self {
+                    Self::Empty => Empty.read_prg_rom(addr),
+                    $(Self::$mapper(c) => c.read_prg_rom(addr),)*
+                }
+            }
+
+            fn write_prg_rom(&mut self, addr: u16, data: u8) {
+                match self {
+                    Self::Empty => Empty.write_prg_rom(addr, data),
+                    $(Self::$mapper(c) => c.write_prg_rom(addr, data),)*
+                }
+            }
+
+            fn read_prg_ram(&self, addr: u16) -> Option<u8> {
+                match self {
+                    Self::Empty => Empty.read_prg_ram(addr),
+                    $(Self::$mapper(c) => c.read_prg_ram(addr),)*
+                }
+            }
+
+            fn write_prg_ram(&mut self, addr: u16, data: u8) {
+                match self {
+                    Self::Empty => Empty.write_prg_ram(addr, data),
+                    $(Self::$mapper(c) => c.write_prg_ram(addr, data),)*
+                }
+            }
+
+            fn read_chr(&self, addr: u16) -> u8 {
+                match self {
+                    Self::Empty => Empty.read_chr(addr),
+                    $(Self::$mapper(c) => c.read_chr(addr),)*
+                }
+            }
+
+            fn write_chr(&mut self, addr: u16, data: u8) {
+                match self {
+                    Self::Empty => Empty.write_chr(addr, data),
+                    $(Self::$mapper(c) => c.write_chr(addr, data),)*
+                }
+            }
+
+            fn read_nametable(&self, addr: u16) -> u8 {
+                match self {
+                    Self::Empty => Empty.read_nametable(addr),
+                    $(Self::$mapper(c) => c.read_nametable(addr),)*
+                }
+            }
+
+            fn write_nametable(&mut self, addr: u16, data: u8) {
+                match self {
+                    Self::Empty => Empty.write_nametable(addr, data),
+                    $(Self::$mapper(c) => c.write_nametable(addr, data),)*
+                }
+            }
+        }
+    };
 }
 
-impl Cartridge for CartridgeEnum {
-    fn read_prg_rom(&self, addr: u16) -> Option<u8> {
-        match self {
-            Self::Empty => None,
-            Self::NROM(n) => n.read_prg_rom(addr),
-        }
-    }
-
-    fn write_prg_rom(&mut self, addr: u16, data: u8) {
-        match self {
-            Self::Empty => (),
-            Self::NROM(n) => n.write_prg_rom(addr, data),
-        }
-    }
-
-    fn read_prg_ram(&self, addr: u16) -> Option<u8> {
-        match self {
-            Self::Empty => None,
-            Self::NROM(n) => n.read_prg_ram(addr),
-        }
-    }
-
-    fn write_prg_ram(&mut self, addr: u16, data: u8) {
-        match self {
-            Self::Empty => (),
-            Self::NROM(n) => n.write_prg_ram(addr, data),
-        }
-    }
-
-    fn read_chr(&self, addr: u16) -> u8 {
-        match self {
-            Self::Empty => 0,
-            Self::NROM(n) => n.read_chr(addr),
-        }
-    }
-
-    fn write_chr(&mut self, addr: u16, data: u8) {
-        match self {
-            Self::Empty => (),
-            Self::NROM(n) => n.write_chr(addr, data),
-        }
-    }
-
-    fn read_nametable(&self, addr: u16) -> u8 {
-        match self {
-            Self::Empty => 0,
-            Self::NROM(n) => n.read_nametable(addr),
-        }
-    }
-
-    fn write_nametable(&mut self, addr: u16, data: u8) {
-        match self {
-            Self::Empty => (),
-            Self::NROM(n) => n.write_nametable(addr, data),
-        }
-    }
-}
+generate_cartridge_enum!(NROM);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Mirroring {
@@ -110,13 +110,13 @@ pub enum Mirroring {
 }
 
 #[derive(Clone)]
-pub struct MirroredNametable {
+pub struct Nametable {
     mirroring: Mirroring,
     a: [u8; 0x0400],
     b: [u8; 0x0400],
 }
 
-impl MirroredNametable {
+impl Nametable {
     pub fn new(mirroring: Mirroring) -> Self {
         Self {
             mirroring,
@@ -165,7 +165,7 @@ pub struct NROM {
     rom: Arc<[u8; 0x8000]>,
 
     // technically the data is stored on the NES itself but we store it here for convenience
-    nametable: MirroredNametable,
+    nametable: Nametable,
 
     // ram is not included on hardware but some emulator tests use it
     // to save memory when unused we store it optionally on the heap
@@ -182,7 +182,7 @@ fn concat<const A: usize, const B: usize>(a: [u8; A], b: [u8; B]) -> [u8; A + B]
 impl NROM {
     pub fn new_256(mirroring: Mirroring, chr: [u8; 0x2000], rom: [u8; 0x8000]) -> Self {
         Self {
-            nametable: MirroredNametable::new(mirroring),
+            nametable: Nametable::new(mirroring),
             ram: None,
             rom: Arc::new(rom),
             chr: Arc::new(chr),
@@ -190,7 +190,7 @@ impl NROM {
     }
     pub fn new_128(mirroring: Mirroring, chr: [u8; 0x2000], rom: [u8; 0x4000]) -> Self {
         Self {
-            nametable: MirroredNametable::new(mirroring),
+            nametable: Nametable::new(mirroring),
             ram: None,
             rom: Arc::new(concat(rom, rom)),
             chr: Arc::new(chr),
@@ -199,21 +199,11 @@ impl NROM {
 }
 
 impl Cartridge for NROM {
-    fn read_chr(&self, addr: u16) -> u8 {
-        self.chr[usize::from(addr)]
-    }
+    fn read_chr(&self, addr: u16) -> u8 { self.chr[usize::from(addr)] }
 
-    fn write_chr(&mut self, _addr: u16, _data: u8) {
-        // Cannot write to CHR ROM
-    }
+    fn read_nametable(&self, addr: u16) -> u8 { self.nametable.read(addr) }
 
-    fn read_nametable(&self, addr: u16) -> u8 {
-        self.nametable.read(addr)
-    }
-
-    fn write_nametable(&mut self, addr: u16, data: u8) {
-        self.nametable.write(addr, data)
-    }
+    fn write_nametable(&mut self, addr: u16, data: u8) { self.nametable.write(addr, data) }
 
     fn read_prg_ram(&self, addr: u16) -> Option<u8> {
         // return open bus if PRGRAM is uninitialized
@@ -226,11 +216,11 @@ impl Cartridge for NROM {
         self.ram.get_or_insert_with(|| Box::new([0; 0x2000]))[usize::from(addr & 0x1FFF)] = data;
     }
 
-    fn read_prg_rom(&self, addr: u16) -> Option<u8> {
-        Some(self.rom[usize::from(addr & 0x7FFF)])
-    }
+    fn read_prg_rom(&self, addr: u16) -> Option<u8> { Some(self.rom[usize::from(addr & 0x7FFF)]) }
 
-    fn write_prg_rom(&mut self, _addr: u16, _data: u8) {
-        // Cannot write to PRG ROM
-    }
+    // Cannot write to CHR ROM
+    fn write_chr(&mut self, _addr: u16, _data: u8) {}
+
+    // Cannot write to PRG ROM
+    fn write_prg_rom(&mut self, _addr: u16, _data: u8) {}
 }

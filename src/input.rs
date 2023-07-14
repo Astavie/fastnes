@@ -9,12 +9,8 @@ pub struct Controllers {
 }
 
 impl Controllers {
-    pub(crate) fn read_left(&mut self, open: u8) -> u8 {
-        self.left.read(open)
-    }
-    pub(crate) fn read_right(&mut self, open: u8) -> u8 {
-        self.right.read(open)
-    }
+    pub(crate) fn read_left(&mut self, open: u8) -> u8 { self.left.read(open) }
+    pub(crate) fn read_right(&mut self, open: u8) -> u8 { self.right.read(open) }
     pub(crate) fn write(&mut self, data: u8) {
         self.left.write(data);
         self.right.write(data);
@@ -51,9 +47,7 @@ struct StandardController {
 struct Unconnected;
 
 impl Controller for Unconnected {
-    fn read(&mut self, open: u8) -> u8 {
-        open
-    }
+    fn read(&mut self, open: u8) -> u8 { open }
     fn write(&mut self, _data: u8) {}
 }
 

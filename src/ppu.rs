@@ -10,6 +10,8 @@ pub struct Color {
     pub a: u8,
 }
 
+pub type Frame = [Color; 61440]; // 256 * 240 pixels
+
 pub trait PPU: Clone {
     fn write(&mut self, cycle: usize, addr: u16, data: u8, cart: &mut impl Cartridge);
     fn read(&mut self, cycle: usize, addr: u16, cart: &impl Cartridge) -> u8;
@@ -17,7 +19,7 @@ pub trait PPU: Clone {
     fn nmi(&mut self, cycle: usize) -> bool;
     fn reset(&mut self);
 
-    fn frame(&self, cart: &impl Cartridge, options: DrawOptions) -> [Color; 61440]; // 256 * 240 pixels
+    fn draw_frame(&self, cart: &impl Cartridge, options: DrawOptions) -> Frame;
     fn frame_number(&mut self, cycle: usize) -> usize;
 }
 
@@ -34,16 +36,12 @@ pub(crate) struct DummyPPU;
 
 impl PPU for DummyPPU {
     fn write(&mut self, _cycle: usize, _addr: u16, _data: u8, _cart: &mut impl Cartridge) {}
-    fn read(&mut self, _cycle: usize, _addr: u16, _cart: &impl Cartridge) -> u8 {
-        0
-    }
+    fn read(&mut self, _cycle: usize, _addr: u16, _cart: &impl Cartridge) -> u8 { 0 }
 
-    fn nmi(&mut self, _cycle: usize) -> bool {
-        false
-    }
+    fn nmi(&mut self, _cycle: usize) -> bool { false }
     fn reset(&mut self) {}
 
-    fn frame(&self, _cart: &impl Cartridge, _options: DrawOptions) -> [Color; 61440] {
+    fn draw_frame(&self, _cart: &impl Cartridge, _options: DrawOptions) -> Frame {
         [Color {
             r: 0,
             g: 0,
@@ -51,9 +49,7 @@ impl PPU for DummyPPU {
             a: 255,
         }; 61440]
     }
-    fn frame_number(&mut self, _cycle: usize) -> usize {
-        0
-    }
+    fn frame_number(&mut self, _cycle: usize) -> usize { 0 }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -755,11 +751,9 @@ impl PPU for FastPPU {
         }
     }
 
-    fn reset(&mut self) {
-        *self = Self::new();
-    }
+    fn reset(&mut self) { *self = Self::new(); }
 
-    fn frame(&self, cart: &impl Cartridge, options: DrawOptions) -> [Color; 61440] {
+    fn draw_frame(&self, cart: &impl Cartridge, options: DrawOptions) -> Frame {
         let sprites = options == DrawOptions::All || options == DrawOptions::Sprites;
         let background = options == DrawOptions::All || options == DrawOptions::Background;
 
