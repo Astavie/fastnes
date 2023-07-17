@@ -17,7 +17,10 @@ mod tests {
     use test::Bencher;
 
     use super::*;
-    use std::fs::read;
+    use std::{
+        assert_eq, format,
+        fs::{read, read_to_string},
+    };
 
     #[bench]
     fn nestest_dummy(b: &mut Bencher) {
@@ -25,6 +28,9 @@ mod tests {
         let bytes = &mut file[16..16400];
         bytes[0xFFFC & 0x3FFF] = 0x00;
         bytes[0xFFFD & 0x3FFF] = 0xC0;
+
+        let log = read_to_string("test/nestest/nestest.log").unwrap();
+        let mut addrs = log.lines().map(|line| &line[0..4]);
 
         let cartridge = cart::NROM::new_128(
             cart::Mirroring::Horizontal,
@@ -34,13 +40,25 @@ mod tests {
         let mut nes = nes::NES::new(cartridge, input::Controllers::disconnected(), ppu::DummyPPU);
 
         b.iter(|| {
-            nes.reset();
-
             const END_CYCLE: usize = 26548;
             const END_ADDR: u16 = 0xC6A2;
 
             while nes.cycle_number() < END_CYCLE {
                 nes.instruction();
+
+                assert_eq!(format!("{:04X}", nes.cpu.PC), addrs.next().unwrap());
+
+                let op = nes.read(nes.cpu.PC);
+                println!(
+                    "{:04X} {:02X} A:{:02X} X:{:02X} Y:{:02X} SP:{:02X} cyc:{}",
+                    nes.cpu.PC,
+                    op,
+                    nes.cpu.A,
+                    nes.cpu.X,
+                    nes.cpu.Y,
+                    nes.cpu.SP,
+                    nes.cycle_number()
+                );
             }
 
             assert_eq!(nes.cycle_number(), END_CYCLE);
@@ -60,15 +78,10 @@ mod tests {
             [0; 0x2000],
             bytes.try_into().unwrap(),
         );
-        let mut nes = nes::NES::new(
-            cartridge,
-            input::Controllers::disconnected(),
-            ppu::FastPPU::new(),
-        );
+        let mut nes =
+            nes::NES::new(cartridge, input::Controllers::disconnected(), ppu::FastPPU::new());
 
         b.iter(|| {
-            nes.reset();
-
             const END_CYCLE: usize = 26548;
             const END_ADDR: u16 = 0xC6A2;
 
@@ -82,12 +95,8 @@ mod tests {
     }
 
     fn test_file(file: &str) {
-        let mut cpu = nes::NES::read_ines(
-            file,
-            input::Controllers::disconnected(),
-            ppu::FastPPU::new(),
-        );
-        cpu.reset();
+        let mut cpu =
+            nes::NES::read_ines(file, input::Controllers::disconnected(), ppu::FastPPU::new());
 
         let mut started = false;
 

@@ -206,8 +206,12 @@ impl Cartridge for NROM {
     fn write_nametable(&mut self, addr: u16, data: u8) { self.nametable.write(addr, data) }
 
     fn read_prg_ram(&self, addr: u16) -> Option<u8> {
-        // return open bus if PRGRAM is uninitialized
-        self.ram.as_ref().map(|ram| ram[usize::from(addr & 0x1FFF)])
+        // return 0 if PRGRAM is uninitialized
+        Some(
+            self.ram
+                .as_ref()
+                .map_or(0, |ram| ram[usize::from(addr & 0x1FFF)]),
+        )
     }
 
     fn write_prg_ram(&mut self, addr: u16, data: u8) {

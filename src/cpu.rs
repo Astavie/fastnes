@@ -145,6 +145,21 @@ impl<C: Cartridge, P: PPU> NES<C, P> {
                 let addr = u16::from_le_bytes([lo, hi]);
                 self.cpu.PC = addr;
             }
+            0x6C => {
+                // JMP ind
+                let lo = self.cycle_read_pc();
+                let hi = self.cycle_read_pc();
+                let addr_lo = u16::from_le_bytes([lo, hi]);
+                let addr_hi = u16::from_le_bytes([lo.wrapping_add(1), hi]);
+
+                let lo = self.cycle_read(addr_lo);
+
+                self.poll_interrupts();
+
+                let hi = self.cycle_read(addr_hi);
+                let addr = u16::from_le_bytes([lo, hi]);
+                self.cpu.PC = addr;
+            }
             0x20 => {
                 // JSR
                 let lo = self.cycle_read_pc();
@@ -171,6 +186,19 @@ impl<C: Cartridge, P: PPU> NES<C, P> {
 
                 self.cycle_read_pc();
             }
+            0x40 => {
+                // RTI
+                self.cycle_poke_pc();
+                self.cycle_pop();
+                self.cpu.P = self.cycle_pop() & 0b11001111;
+                let lo = self.cycle_pop();
+
+                self.poll_interrupts();
+
+                let hi = self.cycle_peek();
+                let addr = u16::from_le_bytes([lo, hi]);
+                self.cpu.PC = addr;
+            }
 
             // NOP
             0xEA => self.imp(|_| ()),
@@ -185,9 +213,77 @@ impl<C: Cartridge, P: PPU> NES<C, P> {
 
             // STACK
             0x48 => self.imp_push(|cpu| cpu.A),
-            0x08 => self.imp_push(|cpu| cpu.P),
+            0x08 => self.imp_push(|cpu| cpu.P | 0b00110000),
             0x68 => self.imp_pop(|cpu, data| cpu.A = cpu.flags(data)),
-            0x28 => self.imp_pop(|cpu, data| cpu.P = data),
+            0x28 => self.imp_pop(|cpu, data| cpu.P = data & 0b11001111),
+
+            // TRANSFER
+            0xAA => self.imp(|cpu| cpu.X = cpu.flags(cpu.A)),
+            0xA8 => self.imp(|cpu| cpu.Y = cpu.flags(cpu.A)),
+            0xBA => self.imp(|cpu| cpu.X = cpu.flags(cpu.SP)),
+            0x8A => self.imp(|cpu| cpu.A = cpu.flags(cpu.X)),
+            0x9A => self.imp(|cpu| cpu.SP = cpu.X),
+            0x98 => self.imp(|cpu| cpu.A = cpu.flags(cpu.Y)),
+
+            // INC
+            0xE8 => self.imp(|cpu| cpu.X = cpu.flags(cpu.X.wrapping_add(1))),
+            0xC8 => self.imp(|cpu| cpu.Y = cpu.flags(cpu.Y.wrapping_add(1))),
+
+            0xE6 => self.zpg_rw(CPU::INC),
+            0xF6 => self.zpg_x_rw(CPU::INC),
+            0xEE => self.abs_rw(CPU::INC),
+            0xFE => self.abs_x_rw(CPU::INC),
+
+            0xCA => self.imp(|cpu| cpu.X = cpu.flags(cpu.X.wrapping_sub(1))),
+            0x88 => self.imp(|cpu| cpu.Y = cpu.flags(cpu.Y.wrapping_sub(1))),
+
+            0xC6 => self.zpg_rw(CPU::DEC),
+            0xD6 => self.zpg_x_rw(CPU::DEC),
+            0xCE => self.abs_rw(CPU::DEC),
+            0xDE => self.abs_x_rw(CPU::DEC),
+
+            // SHIFT
+            0x0A => self.acc(CPU::ASL),
+            0x06 => self.zpg_rw(CPU::ASL),
+            0x16 => self.zpg_x_rw(CPU::ASL),
+            0x0E => self.abs_rw(CPU::ASL),
+            0x1E => self.abs_x_rw(CPU::ASL),
+
+            0x4A => self.acc(CPU::LSR),
+            0x46 => self.zpg_rw(CPU::LSR),
+            0x56 => self.zpg_x_rw(CPU::LSR),
+            0x4E => self.abs_rw(CPU::LSR),
+            0x5E => self.abs_x_rw(CPU::LSR),
+
+            0x2A => self.acc(CPU::ROL),
+            0x26 => self.zpg_rw(CPU::ROL),
+            0x36 => self.zpg_x_rw(CPU::ROL),
+            0x2E => self.abs_rw(CPU::ROL),
+            0x3E => self.abs_x_rw(CPU::ROL),
+
+            0x6A => self.acc(CPU::ROR),
+            0x66 => self.zpg_rw(CPU::ROR),
+            0x76 => self.zpg_x_rw(CPU::ROR),
+            0x6E => self.abs_rw(CPU::ROR),
+            0x7E => self.abs_x_rw(CPU::ROR),
+
+            // COMPARE
+            0xC9 => self.imm(CPU::CMP),
+            0xC5 => self.zpg_read(CPU::CMP),
+            0xD5 => self.zpg_x_read(CPU::CMP),
+            0xCD => self.abs_read(CPU::CMP),
+            0xDD => self.abs_x_read(CPU::CMP),
+            0xD9 => self.abs_y_read(CPU::CMP),
+            0xC1 => self.x_ind_read(CPU::CMP),
+            0xD1 => self.ind_y_read(CPU::CMP),
+
+            0xE0 => self.imm(CPU::CPX),
+            0xE4 => self.zpg_read(CPU::CPX),
+            0xEC => self.abs_read(CPU::CPX),
+
+            0xC0 => self.imm(CPU::CPY),
+            0xC4 => self.zpg_read(CPU::CPY),
+            0xCC => self.abs_read(CPU::CPY),
 
             // LOAD/STORE
             0xA9 => self.imm(CPU::LDA),
@@ -200,7 +296,7 @@ impl<C: Cartridge, P: PPU> NES<C, P> {
             0xB1 => self.ind_y_read(CPU::LDA),
 
             0x85 => self.zpg_write(CPU::STA),
-            0x95 => self.zpg_y_write(CPU::STA),
+            0x95 => self.zpg_x_write(CPU::STA),
             0x8D => self.abs_write(CPU::STA),
             0x9D => self.abs_x_write(CPU::STA),
             0x99 => self.abs_y_write(CPU::STA),
@@ -217,17 +313,74 @@ impl<C: Cartridge, P: PPU> NES<C, P> {
             0x96 => self.zpg_y_write(CPU::STX),
             0x8E => self.abs_write(CPU::STX),
 
+            0xA0 => self.imm(CPU::LDY),
+            0xA4 => self.zpg_read(CPU::LDY),
+            0xB4 => self.zpg_x_read(CPU::LDY),
+            0xAC => self.abs_read(CPU::LDY),
+            0xBC => self.abs_x_read(CPU::LDY),
+
+            0x84 => self.zpg_write(CPU::STY),
+            0x94 => self.zpg_x_write(CPU::STY),
+            0x8C => self.abs_write(CPU::STY),
+
+            // BITWISE
+            0x29 => self.imm(CPU::AND),
+            0x25 => self.zpg_read(CPU::AND),
+            0x35 => self.zpg_x_read(CPU::AND),
+            0x2D => self.abs_read(CPU::AND),
+            0x3D => self.abs_x_read(CPU::AND),
+            0x39 => self.abs_y_read(CPU::AND),
+            0x21 => self.x_ind_read(CPU::AND),
+            0x31 => self.ind_y_read(CPU::AND),
+
+            0x09 => self.imm(CPU::ORA),
+            0x05 => self.zpg_read(CPU::ORA),
+            0x15 => self.zpg_x_read(CPU::ORA),
+            0x0D => self.abs_read(CPU::ORA),
+            0x1D => self.abs_x_read(CPU::ORA),
+            0x19 => self.abs_y_read(CPU::ORA),
+            0x01 => self.x_ind_read(CPU::ORA),
+            0x11 => self.ind_y_read(CPU::ORA),
+
+            0x49 => self.imm(CPU::EOR),
+            0x45 => self.zpg_read(CPU::EOR),
+            0x55 => self.zpg_x_read(CPU::EOR),
+            0x4D => self.abs_read(CPU::EOR),
+            0x5D => self.abs_x_read(CPU::EOR),
+            0x59 => self.abs_y_read(CPU::EOR),
+            0x41 => self.x_ind_read(CPU::EOR),
+            0x51 => self.ind_y_read(CPU::EOR),
+
+            0x24 => self.zpg_read(CPU::BIT),
+            0x2C => self.abs_read(CPU::BIT),
+
+            // ADD/SUB
+            0x69 => self.imm(CPU::ADC),
+            0x65 => self.zpg_read(CPU::ADC),
+            0x75 => self.zpg_x_read(CPU::ADC),
+            0x6D => self.abs_read(CPU::ADC),
+            0x7D => self.abs_x_read(CPU::ADC),
+            0x79 => self.abs_y_read(CPU::ADC),
+            0x61 => self.x_ind_read(CPU::ADC),
+            0x71 => self.ind_y_read(CPU::ADC),
+
+            0xE9 => self.imm(CPU::SBC),
+            0xE5 => self.zpg_read(CPU::SBC),
+            0xF5 => self.zpg_x_read(CPU::SBC),
+            0xED => self.abs_read(CPU::SBC),
+            0xFD => self.abs_x_read(CPU::SBC),
+            0xF9 => self.abs_y_read(CPU::SBC),
+            0xE1 => self.x_ind_read(CPU::SBC),
+            0xF1 => self.ind_y_read(CPU::SBC),
+
             // FLAGS
             0x18 => self.imp(|cpu| cpu.P &= 0b11111110),
-            0x38 => self.imp(|cpu| cpu.P |= 0b00000100),
-            0x58 => self.imp(|cpu| cpu.P &= 0b11111110),
+            0x38 => self.imp(|cpu| cpu.P |= 0b00000001),
+            0x58 => self.imp(|cpu| cpu.P &= 0b11111011),
             0x78 => self.imp(|cpu| cpu.P |= 0b00000100),
             0xB8 => self.imp(|cpu| cpu.P &= 0b10111111),
             0xD8 => self.imp(|cpu| cpu.P &= 0b11110111),
             0xF8 => self.imp(|cpu| cpu.P |= 0b00001000),
-
-            0x24 => self.zpg_read(CPU::BIT),
-            0x2C => self.abs_read(CPU::BIT),
 
             0x10 => self.branch(|p| p & 0b10000000 == 0),
             0x30 => self.branch(|p| p & 0b10000000 != 0),
@@ -348,6 +501,13 @@ impl<C: Cartridge, P: PPU> NES<C, P> {
         self.poll_interrupts();
         let data = self.cycle_read_pc();
         f(&mut self.cpu, data);
+    }
+    fn acc(&mut self, f: fn(&mut CPU, u8) -> u8) {
+        self.poll_interrupts();
+        self.cycle_poke_pc();
+        let data = self.cpu.A;
+        let data = f(&mut self.cpu, data);
+        self.cpu.A = data;
     }
 
     mode_zpg!(zpg_read, zpg_write, zpg_rw, zpg());
@@ -477,11 +637,93 @@ impl CPU {
     // COMMON MICRO-INSTRUCTIONS
     fn LDA(&mut self, val: u8) { self.A = self.flags(val) }
     fn LDX(&mut self, val: u8) { self.X = self.flags(val) }
+    fn LDY(&mut self, val: u8) { self.Y = self.flags(val) }
     fn STA(&mut self) -> u8 { self.A }
     fn STX(&mut self) -> u8 { self.X }
+    fn STY(&mut self) -> u8 { self.Y }
 
     fn BIT(&mut self, val: u8) {
-        self.flags(self.A & val);
+        self.P &= 0b00111101;
+        if self.A & val == 0 {
+            self.P |= 0b00000010;
+        }
         self.P |= val & 0b11000000;
+    }
+
+    fn AND(&mut self, val: u8) { self.A = self.flags(self.A & val) }
+    fn ORA(&mut self, val: u8) { self.A = self.flags(self.A | val) }
+    fn EOR(&mut self, val: u8) { self.A = self.flags(self.A ^ val) }
+
+    fn CMP(&mut self, val: u8) { self.compare(val, self.A) }
+    fn CPX(&mut self, val: u8) { self.compare(val, self.X) }
+    fn CPY(&mut self, val: u8) { self.compare(val, self.Y) }
+
+    fn INC(&mut self, val: u8) -> u8 { self.flags(val.wrapping_add(1)) }
+    fn DEC(&mut self, val: u8) -> u8 { self.flags(val.wrapping_sub(1)) }
+
+    fn ADC(&mut self, val: u8) {
+        let (v0, c0) = self.A.overflowing_add(val);
+        let (v1, c1) = v0.overflowing_add(self.P & 1);
+
+        self.P &= 0b10111110;
+
+        // carry flag
+        if c0 || c1 {
+            self.P |= 0b00000001;
+        }
+
+        // overflow flag
+        let sa = self.A & 0b10000000;
+        let sb = val & 0b10000000;
+        let sv = v1 & 0b10000000;
+        if sa == sb && sb != sv {
+            self.P |= 0b01000000;
+        }
+
+        self.A = self.flags(v1);
+    }
+    fn SBC(&mut self, val: u8) {
+        let (v0, c0) = self.A.overflowing_sub(val);
+        let (v1, c1) = v0.overflowing_sub(self.P & 1 ^ 1);
+
+        self.P &= 0b10111110;
+
+        // borrow flag
+        if !(c0 || c1) {
+            self.P |= 0b00000001;
+        }
+
+        // overflow flag
+        let sa = self.A & 0b10000000;
+        let sb = val & 0b10000000;
+        let sv = v1 & 0b10000000;
+        if sa != sb && sb == sv {
+            self.P |= 0b01000000;
+        }
+
+        self.A = self.flags(v1);
+    }
+
+    fn ASL(&mut self, val: u8) -> u8 {
+        self.P &= 0b11111110;
+        self.P |= val >> 7;
+        self.flags(val << 1)
+    }
+    fn LSR(&mut self, val: u8) -> u8 {
+        self.P &= 0b11111110;
+        self.P |= val & 1;
+        self.flags(val >> 1)
+    }
+    fn ROL(&mut self, val: u8) -> u8 {
+        let carry = self.P & 1;
+        self.P &= 0b11111110;
+        self.P |= val >> 7;
+        self.flags(val << 1 | carry)
+    }
+    fn ROR(&mut self, val: u8) -> u8 {
+        let carry = self.P << 7;
+        self.P &= 0b11111110;
+        self.P |= val & 1;
+        self.flags(val >> 1 | carry)
     }
 }
