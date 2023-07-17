@@ -12,6 +12,8 @@ pub trait Cartridge: Clone {
 
     fn read_nametable(&self, addr: u16) -> u8;
     fn write_nametable(&mut self, addr: u16, data: u8);
+
+    fn from_ines(file: Vec<u8>) -> Self;
 }
 
 #[derive(Clone)]
@@ -27,6 +29,8 @@ impl Cartridge for Empty {
     fn write_prg_ram(&mut self, _addr: u16, _dataa: u8) {}
     fn write_chr(&mut self, _addr: u16, _dataa: u8) {}
     fn write_nametable(&mut self, _addr: u16, _dataa: u8) {}
+
+    fn from_ines(_file: Vec<u8>) -> Self { panic!() }
 }
 
 macro_rules! generate_cartridge_enum {
@@ -95,6 +99,8 @@ macro_rules! generate_cartridge_enum {
                     $(Self::$mapper(c) => c.write_nametable(addr, data),)*
                 }
             }
+
+            fn from_ines(_file: Vec<u8>) -> Self { todo!() }
         }
     };
 }
@@ -227,4 +233,27 @@ impl Cartridge for NROM {
 
     // Cannot write to PRG ROM
     fn write_prg_rom(&mut self, _addr: u16, _data: u8) {}
+
+    fn from_ines(file: Vec<u8>) -> Self {
+        let chr_start = 16 + 0x4000 * usize::from(file[4]);
+        let chr_end = chr_start + 0x2000;
+
+        let chr = match file[5] {
+            0 => [0; 0x2000],
+            1 => file[chr_start..chr_end].try_into().unwrap(),
+            _ => panic!(),
+        };
+
+        let mirroring = if file[6] & 1 == 0 {
+            Mirroring::Horizontal
+        } else {
+            Mirroring::Vertical
+        };
+
+        match file[4] {
+            1 => NROM::new_128(mirroring, chr, file[16..chr_start].try_into().unwrap()),
+            2 => NROM::new_256(mirroring, chr, file[16..chr_start].try_into().unwrap()),
+            _ => panic!(),
+        }
+    }
 }

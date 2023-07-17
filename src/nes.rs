@@ -1,7 +1,7 @@
 use std::fs::read;
 
 use crate::{
-    cart::{Cartridge, CartridgeEnum, Mirroring, NROM},
+    cart::{Cartridge, CartridgeEnum, NROM},
     cpu::CPU,
     input::Controllers,
     ppu::{DrawOptions, Frame, PPU},
@@ -23,36 +23,7 @@ pub struct NES<C: Cartridge, P: PPU> {
 impl<P: PPU> NES<CartridgeEnum, P> {
     pub fn read_ines(path: &str, controllers: Controllers, ppu: P) -> Self {
         let file = read(path).unwrap();
-
-        let chr_start = 16 + 0x4000 * usize::from(file[4]);
-        let chr_end = chr_start + 0x2000;
-
-        let chr = match file[5] {
-            0 => [0; 0x2000],
-            1 => file[chr_start..chr_end].try_into().unwrap(),
-            _ => panic!(),
-        };
-
-        let mirroring = if file[6] & 1 == 0 {
-            Mirroring::Horizontal
-        } else {
-            Mirroring::Vertical
-        };
-
-        let cartridge = match file[4] {
-            1 => CartridgeEnum::NROM(NROM::new_128(
-                mirroring,
-                chr,
-                file[16..chr_start].try_into().unwrap(),
-            )),
-            2 => CartridgeEnum::NROM(NROM::new_256(
-                mirroring,
-                chr,
-                file[16..chr_start].try_into().unwrap(),
-            )),
-            _ => panic!(),
-        };
-
+        let cartridge = CartridgeEnum::NROM(NROM::from_ines(file));
         Self::new(cartridge, controllers, ppu)
     }
 }
