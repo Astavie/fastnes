@@ -22,8 +22,8 @@ mod tests {
         fs::{read, read_to_string},
     };
 
-    #[bench]
-    fn nestest_dummy(b: &mut Bencher) {
+    #[test]
+    fn nestest_debug() {
         let mut file = read("test/nestest/nestest.nes").unwrap();
         let bytes = &mut file[16..16400];
         bytes[0xFFFC & 0x3FFF] = 0x00;
@@ -39,26 +39,51 @@ mod tests {
         );
         let mut nes = nes::NES::new(cartridge, input::Controllers::disconnected(), ppu::DummyPPU);
 
+        const END_CYCLE: usize = 26548;
+        const END_ADDR: u16 = 0xC6A2;
+
+        while nes.cycle_number() < END_CYCLE {
+            nes.instruction();
+
+            assert_eq!(format!("{:04X}", nes.cpu.PC), addrs.next().unwrap());
+
+            let op = nes.read(nes.cpu.PC);
+            println!(
+                "{:04X} {:02X} A:{:02X} X:{:02X} Y:{:02X} SP:{:02X} cyc:{}",
+                nes.cpu.PC,
+                op,
+                nes.cpu.A,
+                nes.cpu.X,
+                nes.cpu.Y,
+                nes.cpu.SP,
+                nes.cycle_number()
+            );
+        }
+
+        assert_eq!(nes.cycle_number(), END_CYCLE);
+        assert_eq!(nes.cpu.PC, END_ADDR);
+    }
+
+    #[bench]
+    fn nestest_dummy(b: &mut Bencher) {
+        let mut file = read("test/nestest/nestest.nes").unwrap();
+        let bytes = &mut file[16..16400];
+        bytes[0xFFFC & 0x3FFF] = 0x00;
+        bytes[0xFFFD & 0x3FFF] = 0xC0;
+
+        let cartridge = cart::NROM::new_128(
+            cart::Mirroring::Horizontal,
+            [0; 0x2000],
+            bytes.try_into().unwrap(),
+        );
+        let mut nes = nes::NES::new(cartridge, input::Controllers::disconnected(), ppu::DummyPPU);
+
         b.iter(|| {
             const END_CYCLE: usize = 26548;
             const END_ADDR: u16 = 0xC6A2;
 
             while nes.cycle_number() < END_CYCLE {
                 nes.instruction();
-
-                assert_eq!(format!("{:04X}", nes.cpu.PC), addrs.next().unwrap());
-
-                let op = nes.read(nes.cpu.PC);
-                println!(
-                    "{:04X} {:02X} A:{:02X} X:{:02X} Y:{:02X} SP:{:02X} cyc:{}",
-                    nes.cpu.PC,
-                    op,
-                    nes.cpu.A,
-                    nes.cpu.X,
-                    nes.cpu.Y,
-                    nes.cpu.SP,
-                    nes.cycle_number()
-                );
             }
 
             assert_eq!(nes.cycle_number(), END_CYCLE);

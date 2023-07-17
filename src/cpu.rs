@@ -203,14 +203,6 @@ impl<C: Cartridge, P: PPU> NES<C, P> {
             // NOP
             0xEA => self.imp(|_| ()),
 
-            // NOP*
-            0x1A | 0x3A | 0x5A | 0x7A | 0xDA | 0xFA => self.imp(|_| ()),
-            0x80 | 0x82 | 0x89 | 0xC2 | 0xE2 => self.imm(|_, _| ()),
-            0x04 | 0x44 | 0x64 => self.zpg_read(|_, _| ()),
-            0x14 | 0x34 | 0x54 | 0x74 | 0xD4 | 0xF4 => self.zpg_x_read(|_, _| ()),
-            0x0C => self.abs_read(|_, _| ()),
-            0x1C | 0x3C | 0x5C | 0x7C | 0xDC | 0xFC => self.abs_x_read(|_, _| ()),
-
             // STACK
             0x48 => self.imp_push(|cpu| cpu.A),
             0x08 => self.imp_push(|cpu| cpu.P | 0b00110000),
@@ -391,6 +383,76 @@ impl<C: Cartridge, P: PPU> NES<C, P> {
             0xD0 => self.branch(|p| p & 0b00000010 == 0),
             0xF0 => self.branch(|p| p & 0b00000010 != 0),
 
+            // ILLEGAL
+            0x1A | 0x3A | 0x5A | 0x7A | 0xDA | 0xFA => self.imp(|_| ()),
+            0x80 | 0x82 | 0x89 | 0xC2 | 0xE2 => self.imm(|_, _| ()),
+            0x04 | 0x44 | 0x64 => self.zpg_read(|_, _| ()),
+            0x14 | 0x34 | 0x54 | 0x74 | 0xD4 | 0xF4 => self.zpg_x_read(|_, _| ()),
+            0x0C => self.abs_read(|_, _| ()),
+            0x1C | 0x3C | 0x5C | 0x7C | 0xDC | 0xFC => self.abs_x_read(|_, _| ()),
+
+            0xA7 => self.zpg_read(CPU::LAX),
+            0xB7 => self.zpg_y_read(CPU::LAX),
+            0xAF => self.abs_read(CPU::LAX),
+            0xBF => self.abs_y_read(CPU::LAX),
+            0xA3 => self.x_ind_read(CPU::LAX),
+            0xB3 => self.ind_y_read(CPU::LAX),
+
+            0x87 => self.zpg_write(CPU::SAX),
+            0x97 => self.zpg_y_write(CPU::SAX),
+            0x8F => self.abs_write(CPU::SAX),
+            0x83 => self.x_ind_write(CPU::SAX),
+
+            0xEB => self.imm(CPU::SBC),
+
+            0xC7 => self.zpg_rw(CPU::DCP),
+            0xD7 => self.zpg_x_rw(CPU::DCP),
+            0xCF => self.abs_rw(CPU::DCP),
+            0xDF => self.abs_x_rw(CPU::DCP),
+            0xDB => self.abs_y_rw(CPU::DCP),
+            0xC3 => self.x_ind_rw(CPU::DCP),
+            0xD3 => self.ind_y_rw(CPU::DCP),
+
+            0xE7 => self.zpg_rw(CPU::ISC),
+            0xF7 => self.zpg_x_rw(CPU::ISC),
+            0xEF => self.abs_rw(CPU::ISC),
+            0xFF => self.abs_x_rw(CPU::ISC),
+            0xFB => self.abs_y_rw(CPU::ISC),
+            0xE3 => self.x_ind_rw(CPU::ISC),
+            0xF3 => self.ind_y_rw(CPU::ISC),
+
+            0x07 => self.zpg_rw(CPU::SLO),
+            0x17 => self.zpg_x_rw(CPU::SLO),
+            0x0F => self.abs_rw(CPU::SLO),
+            0x1F => self.abs_x_rw(CPU::SLO),
+            0x1B => self.abs_y_rw(CPU::SLO),
+            0x03 => self.x_ind_rw(CPU::SLO),
+            0x13 => self.ind_y_rw(CPU::SLO),
+
+            0x27 => self.zpg_rw(CPU::RLA),
+            0x37 => self.zpg_x_rw(CPU::RLA),
+            0x2F => self.abs_rw(CPU::RLA),
+            0x3F => self.abs_x_rw(CPU::RLA),
+            0x3B => self.abs_y_rw(CPU::RLA),
+            0x23 => self.x_ind_rw(CPU::RLA),
+            0x33 => self.ind_y_rw(CPU::RLA),
+
+            0x47 => self.zpg_rw(CPU::SRE),
+            0x57 => self.zpg_x_rw(CPU::SRE),
+            0x4F => self.abs_rw(CPU::SRE),
+            0x5F => self.abs_x_rw(CPU::SRE),
+            0x5B => self.abs_y_rw(CPU::SRE),
+            0x43 => self.x_ind_rw(CPU::SRE),
+            0x53 => self.ind_y_rw(CPU::SRE),
+
+            0x67 => self.zpg_rw(CPU::RRA),
+            0x77 => self.zpg_x_rw(CPU::RRA),
+            0x6F => self.abs_rw(CPU::RRA),
+            0x7F => self.abs_x_rw(CPU::RRA),
+            0x7B => self.abs_y_rw(CPU::RRA),
+            0x63 => self.x_ind_rw(CPU::RRA),
+            0x73 => self.ind_y_rw(CPU::RRA),
+
             _ => todo!("instr 0x{:02X}", op),
         }
     }
@@ -512,7 +574,7 @@ impl<C: Cartridge, P: PPU> NES<C, P> {
 
     mode_zpg!(zpg_read, zpg_write, zpg_rw, zpg());
     mode_zpg!(zpg_x_read, zpg_x_write, zpg_x_rw, zpg_index(X));
-    mode_zpg!(zpg_y_read, zpg_y_write, zpg_y_rw, zpg_index(Y));
+    mode_zpg!(zpg_y_read, zpg_y_write, _zpg_y_rw, zpg_index(Y));
 
     mode_abs!(abs_read, abs_write, abs_rw, abs());
     mode_abs!(abs_x_read, abs_x_write, abs_x_rw, abs_index(w, X));
@@ -725,5 +787,43 @@ impl CPU {
         self.P &= 0b11111110;
         self.P |= val & 1;
         self.flags(val >> 1 | carry)
+    }
+
+    // ILLEGAL
+    fn LAX(&mut self, val: u8) {
+        self.flags(val);
+        self.A = val;
+        self.X = val;
+    }
+    fn SAX(&mut self) -> u8 { self.A & self.X }
+    fn DCP(&mut self, val: u8) -> u8 {
+        let val = self.DEC(val);
+        self.CMP(val);
+        val
+    }
+    fn ISC(&mut self, val: u8) -> u8 {
+        let val = self.INC(val);
+        self.SBC(val);
+        val
+    }
+    fn SLO(&mut self, val: u8) -> u8 {
+        let val = self.ASL(val);
+        self.ORA(val);
+        val
+    }
+    fn RLA(&mut self, val: u8) -> u8 {
+        let val = self.ROL(val);
+        self.AND(val);
+        val
+    }
+    fn SRE(&mut self, val: u8) -> u8 {
+        let val = self.LSR(val);
+        self.EOR(val);
+        val
+    }
+    fn RRA(&mut self, val: u8) -> u8 {
+        let val = self.ROR(val);
+        self.ADC(val);
+        val
     }
 }

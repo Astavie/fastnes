@@ -160,7 +160,7 @@ impl Nametable {
 
 #[derive(Clone)]
 pub struct NROM {
-    // these are reado-only and can be shared among cartridges of the same game
+    // these are read-only and can be shared among cartridges of the same game
     chr: Arc<[u8; 0x2000]>,
     rom: Arc<[u8; 0x8000]>,
 
