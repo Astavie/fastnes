@@ -79,6 +79,8 @@ mod tests {
         let mut nes = nes::NES::new(cartridge, input::Controllers::disconnected(), ppu::DummyPPU);
 
         b.iter(|| {
+            nes.reset();
+
             const END_CYCLE: usize = 26548;
             const END_ADDR: u16 = 0xC6A2;
 
@@ -107,6 +109,8 @@ mod tests {
             nes::NES::new(cartridge, input::Controllers::disconnected(), ppu::FastPPU::new());
 
         b.iter(|| {
+            nes.reset();
+
             const END_CYCLE: usize = 26548;
             const END_ADDR: u16 = 0xC6A2;
 
