@@ -20,6 +20,20 @@ pub struct NES<C: Cartridge, P: PPU> {
     pub cpu: CPU,
 }
 
+impl<C: Cartridge, P: PPU> Clone for NES<C, P> {
+    fn clone(&self) -> Self {
+        Self {
+            ram_internal: self.ram_internal.clone(),
+            open: self.open,
+            ppu_cycle: self.ppu_cycle,
+            cart: self.cart.clone(),
+            ppu: self.ppu.clone(),
+            controllers: Controllers::disconnected(),
+            cpu: self.cpu.clone(),
+        }
+    }
+}
+
 impl<P: PPU> NES<CartridgeEnum, P> {
     pub fn read_ines(path: &str, controllers: Controllers, ppu: P) -> Self {
         let file = read(path).unwrap();
