@@ -1,995 +1,846 @@
-use crate::nes::NES;
-use repeated::repeated;
-use std::fmt::Debug;
-use std::marker::ConstParamTy;
+use crate::{cart::Cartridge, nes::NES, ppu::PPU};
 
-pub type Instruction = fn(&mut NES);
-pub type Instructions = [Instruction; 256];
+#[allow(non_snake_case)]
+#[derive(Clone)]
+pub struct CPU {
+    // registers
+    pub PC: u16,
+    pub SP: u8,
+    pub P: u8,
+    pub A: u8,
+    pub X: u8,
+    pub Y: u8,
 
-trait Addressable {
-    fn poke(&self, cpu: &mut NES);
-    fn read(&self, cpu: &mut NES) -> u8;
-    fn write(&self, cpu: &mut NES, data: u8);
-
-    fn read_flags(&self, cpu: &mut NES) -> u8 {
-        let data = self.read(cpu);
-        cpu.flags(data);
-        data
-    }
-
-    fn compare(&self, cpu: &mut NES, reg: u8) {
-        let data = self.read(cpu);
-        cpu.compare(data, reg);
-    }
+    // interrupts
+    irq_sample: bool,
+    nmi_sample: bool,
+    res_sample: bool,
+    hardware_interrupt: bool,
 }
 
-struct Accumulator();
-struct Implied();
-
-impl Addressable for Accumulator {
-    fn poke(&self, _cpu: &mut NES) {}
-    fn read(&self, cpu: &mut NES) -> u8 {
-        cpu.A
-    }
-    fn write(&self, cpu: &mut NES, data: u8) {
-        cpu.A = data;
-    }
+// READ/WRITE
+macro_rules! mode_abs {
+    ($name_r: ident, $name_w: ident, $name_rw: ident, $addr: ident (w $(, $index: ident)?)) => {
+        mode_full!($name_r, $name_w, $name_rw, $addr(w $(, $index)?), cycle_read, cycle_write);
+    };
+    ($name_r: ident, $name_w: ident, $name_rw: ident, $addr: ident ($($index: ident)?)) => {
+        mode_full!($name_r, $name_w, $name_rw, $addr($($index)?), cycle_read, cycle_write);
+    };
 }
 
-impl Addressable for Implied {
-    fn poke(&self, _cpu: &mut NES) {}
-    fn read(&self, _cpu: &mut NES) -> u8 {
-        unreachable!();
-    }
-    fn write(&self, _cpu: &mut NES, _data: u8) {
-        unreachable!();
-    }
+macro_rules! mode_zpg {
+    ($name_r: ident, $name_w: ident, $name_rw: ident, $addr: ident (w $(, $index: ident)?)) => {
+        mode_full!($name_r, $name_w, $name_rw, $addr(w $(, $index)?), cycle_read_zpg, cycle_write_zpg);
+    };
+    ($name_r: ident, $name_w: ident, $name_rw: ident, $addr: ident ($($index: ident)?)) => {
+        mode_full!($name_r, $name_w, $name_rw, $addr($($index)?), cycle_read_zpg, cycle_write_zpg);
+    };
 }
 
-impl Addressable for u16 {
-    fn poke(&self, cpu: &mut NES) {
-        cpu.read_addr(*self);
-    }
-    fn read(&self, cpu: &mut NES) -> u8 {
-        cpu.read_addr(*self)
-    }
-    fn write(&self, cpu: &mut NES, data: u8) {
-        cpu.write_addr(*self, data)
-    }
+macro_rules! mode_full {
+    ($name_r: ident, $name_w: ident, $name_rw: ident, $addr: ident (w $(, $index: ident)?), $read: ident, $write: ident) => {
+        fn $name_r(&mut self, f: fn(&mut CPU, u8)) {
+            let addr = self.$addr(false $(, self.cpu.$index)?);
+            self.poll_interrupts();
+            let data = self.$read(addr);
+            f(&mut self.cpu, data);
+        }
+        fn $name_w(&mut self, f: fn(&mut CPU) -> u8) {
+            let addr = self.$addr(true $(, self.cpu.$index)?);
+            self.poll_interrupts();
+            let data = f(&mut self.cpu);
+            self.$write(addr, data);
+        }
+        fn $name_rw(&mut self, f: fn(&mut CPU, u8) -> u8) {
+            let addr = self.$addr(true $(, self.cpu.$index)?);
+            let data = self.$read(addr);
+            self.$write(addr, data);
+            self.poll_interrupts();
+            let data = f(&mut self.cpu, data);
+            self.$write(addr, data);
+        }
+    };
+    ($name_r: ident, $name_w: ident, $name_rw: ident, $addr: ident ($($index: ident)?), $read: ident, $write: ident) => {
+        fn $name_r(&mut self, f: fn(&mut CPU, u8)) {
+            let addr = self.$addr($(self.cpu.$index)?);
+            self.poll_interrupts();
+            let data = self.$read(addr);
+            f(&mut self.cpu, data);
+        }
+        fn $name_w(&mut self, f: fn(&mut CPU) -> u8) {
+            let addr = self.$addr($(self.cpu.$index)?);
+            self.poll_interrupts();
+            let data = f(&mut self.cpu);
+            self.$write(addr, data);
+        }
+        fn $name_rw(&mut self, f: fn(&mut CPU, u8) -> u8) {
+            let addr = self.$addr($(self.cpu.$index)?);
+            let data = self.$read(addr);
+            self.$write(addr, data);
+            self.poll_interrupts();
+            let data = f(&mut self.cpu, data);
+            self.$write(addr, data);
+        }
+    };
 }
 
-impl Addressable for u8 {
-    fn poke(&self, cpu: &mut NES) {
-        cpu.read_zeropage(*self);
-    }
-    fn read(&self, cpu: &mut NES) -> u8 {
-        cpu.read_zeropage(*self)
-    }
-    fn write(&self, cpu: &mut NES, data: u8) {
-        cpu.write_zeropage(*self, data)
-    }
-}
-
-impl Micro {
-    const fn from<const OP: u8>() -> Micro {
-        if OP & 0b11101 == 0b11000 {
-            Micro::NOP
+impl<C: Cartridge, P: PPU> NES<C, P> {
+    pub fn instruction(&mut self) {
+        // get instruction to perform
+        let op = if self.cpu.nmi_sample || self.cpu.irq_sample || self.cpu.res_sample {
+            self.cpu.hardware_interrupt = true;
+            self.cycle_read_pc();
+            0
         } else {
-            match OP & 0b11100011 {
-                0x00 => Micro::NOP,
-                0x01 => Micro::ORA,
-                0x02 => Micro::ASL,
-                0x20 => {
-                    if OP & 0b10000 == 0 {
-                        Micro::BIT
-                    } else {
-                        Micro::NOP
-                    }
-                }
-                0x21 => Micro::AND,
-                0x22 => Micro::ROL,
-                0x40 => Micro::NOP,
-                0x41 => Micro::EOR,
-                0x42 => Micro::LSR,
-                0x60 => Micro::NOP,
-                0x61 => Micro::ADC,
-                0x62 => Micro::ROR,
-                0x80 => Micro::STY,
-                0x81 => Micro::STA,
-                0x82 => {
-                    if OP & 0b100 == 0 {
-                        Micro::NOP
-                    } else {
-                        Micro::STX
-                    }
-                }
-                0xA0 => Micro::LDY,
-                0xA1 => Micro::LDA,
-                0xA2 => Micro::LDX,
-                0xC0 => {
-                    if OP & 0b10000 == 0 {
-                        Micro::CPY
-                    } else {
-                        Micro::NOP
-                    }
-                }
-                0xC1 => Micro::CMP,
-                0xC2 => {
-                    if OP & 0b100 == 0 {
-                        Micro::NOP
-                    } else {
-                        Micro::DEC
-                    }
-                }
-                0xE0 => {
-                    if OP & 0b10000 == 0 {
-                        Micro::CPX
-                    } else {
-                        Micro::NOP
-                    }
-                }
-                0xE1 => Micro::SBC,
-                0xE2 => {
-                    if OP & 0b100 == 0 {
-                        Micro::NOP
-                    } else {
-                        Micro::INC
-                    }
-                }
+            self.cycle_read_pc()
+        };
 
-                // illegal
-                0x03 => Micro::SLO,
-                0x23 => Micro::RLA,
-                0x43 => Micro::SRE,
-                0x63 => Micro::RRA,
-                0x83 => Micro::SAX,
-                0xA3 => Micro::LAX,
-                0xC3 => Micro::DCP,
-                0xE3 => Micro::ISC,
-                _ => unreachable!(),
+        match op {
+            0x00 => {
+                // BRK
+                self.cycle_read_pc();
+                self.cycle_push_pc_hi();
+                self.cycle_push_pc_lo();
+
+                // poll address
+                self.poll_interrupts();
+                let addr = if self.cpu.nmi_sample {
+                    self.cpu.nmi_sample = false;
+                    0xFFFA
+                } else if self.cpu.res_sample {
+                    self.cpu.res_sample = false;
+                    0xFFFC
+                } else {
+                    0xFFFE
+                };
+
+                let b = if self.cpu.hardware_interrupt {
+                    // B flag clear
+                    0b00100000
+                } else {
+                    // B flag set
+                    0b00110000
+                };
+                self.cycle_push(self.cpu.P | b);
+
+                // interrupt disable
+                self.cpu.P |= 0b00000100;
+
+                let lo = self.cycle_read(addr);
+                let hi = self.cycle_read(addr | 1);
+                let addr = u16::from_le_bytes([lo, hi]);
+                self.cpu.PC = addr;
+                self.cpu.hardware_interrupt = false;
+
+                // no polling interrupts
+                // immediately execute next instruction
             }
+            0x4C => {
+                // JMP abs
+                let lo = self.cycle_read_pc();
+
+                self.poll_interrupts();
+
+                let hi = self.cycle_read_pc();
+                let addr = u16::from_le_bytes([lo, hi]);
+                self.cpu.PC = addr;
+            }
+            0x6C => {
+                // JMP ind
+                let lo = self.cycle_read_pc();
+                let hi = self.cycle_read_pc();
+                let addr_lo = u16::from_le_bytes([lo, hi]);
+                let addr_hi = u16::from_le_bytes([lo.wrapping_add(1), hi]);
+
+                let lo = self.cycle_read(addr_lo);
+
+                self.poll_interrupts();
+
+                let hi = self.cycle_read(addr_hi);
+                let addr = u16::from_le_bytes([lo, hi]);
+                self.cpu.PC = addr;
+            }
+            0x20 => {
+                // JSR
+                let lo = self.cycle_read_pc();
+                self.cycle_peek();
+                self.cycle_push_pc_hi();
+                self.cycle_push_pc_lo();
+
+                self.poll_interrupts();
+
+                let hi = self.cycle_read_pc();
+                let addr = u16::from_le_bytes([lo, hi]);
+                self.cpu.PC = addr;
+            }
+            0x60 => {
+                // RTS
+                self.cycle_poke_pc();
+                self.cycle_pop();
+                let lo = self.cycle_pop();
+                let hi = self.cycle_peek();
+                let addr = u16::from_le_bytes([lo, hi]);
+                self.cpu.PC = addr;
+
+                self.poll_interrupts();
+
+                self.cycle_read_pc();
+            }
+            0x40 => {
+                // RTI
+                self.cycle_poke_pc();
+                self.cycle_pop();
+                self.cpu.P = self.cycle_pop() & 0b11001111;
+                let lo = self.cycle_pop();
+
+                self.poll_interrupts();
+
+                let hi = self.cycle_peek();
+                let addr = u16::from_le_bytes([lo, hi]);
+                self.cpu.PC = addr;
+            }
+
+            // NOP
+            0xEA => self.imp(|_| ()),
+
+            // STACK
+            0x48 => self.imp_push(|cpu| cpu.A),
+            0x08 => self.imp_push(|cpu| cpu.P | 0b00110000),
+            0x68 => self.imp_pop(|cpu, data| cpu.A = cpu.flags(data)),
+            0x28 => self.imp_pop(|cpu, data| cpu.P = data & 0b11001111),
+
+            // TRANSFER
+            0xAA => self.imp(|cpu| cpu.X = cpu.flags(cpu.A)),
+            0xA8 => self.imp(|cpu| cpu.Y = cpu.flags(cpu.A)),
+            0xBA => self.imp(|cpu| cpu.X = cpu.flags(cpu.SP)),
+            0x8A => self.imp(|cpu| cpu.A = cpu.flags(cpu.X)),
+            0x9A => self.imp(|cpu| cpu.SP = cpu.X),
+            0x98 => self.imp(|cpu| cpu.A = cpu.flags(cpu.Y)),
+
+            // INC
+            0xE8 => self.imp(|cpu| cpu.X = cpu.flags(cpu.X.wrapping_add(1))),
+            0xC8 => self.imp(|cpu| cpu.Y = cpu.flags(cpu.Y.wrapping_add(1))),
+
+            0xE6 => self.zpg_rw(CPU::INC),
+            0xF6 => self.zpg_x_rw(CPU::INC),
+            0xEE => self.abs_rw(CPU::INC),
+            0xFE => self.abs_x_rw(CPU::INC),
+
+            0xCA => self.imp(|cpu| cpu.X = cpu.flags(cpu.X.wrapping_sub(1))),
+            0x88 => self.imp(|cpu| cpu.Y = cpu.flags(cpu.Y.wrapping_sub(1))),
+
+            0xC6 => self.zpg_rw(CPU::DEC),
+            0xD6 => self.zpg_x_rw(CPU::DEC),
+            0xCE => self.abs_rw(CPU::DEC),
+            0xDE => self.abs_x_rw(CPU::DEC),
+
+            // SHIFT
+            0x0A => self.acc(CPU::ASL),
+            0x06 => self.zpg_rw(CPU::ASL),
+            0x16 => self.zpg_x_rw(CPU::ASL),
+            0x0E => self.abs_rw(CPU::ASL),
+            0x1E => self.abs_x_rw(CPU::ASL),
+
+            0x4A => self.acc(CPU::LSR),
+            0x46 => self.zpg_rw(CPU::LSR),
+            0x56 => self.zpg_x_rw(CPU::LSR),
+            0x4E => self.abs_rw(CPU::LSR),
+            0x5E => self.abs_x_rw(CPU::LSR),
+
+            0x2A => self.acc(CPU::ROL),
+            0x26 => self.zpg_rw(CPU::ROL),
+            0x36 => self.zpg_x_rw(CPU::ROL),
+            0x2E => self.abs_rw(CPU::ROL),
+            0x3E => self.abs_x_rw(CPU::ROL),
+
+            0x6A => self.acc(CPU::ROR),
+            0x66 => self.zpg_rw(CPU::ROR),
+            0x76 => self.zpg_x_rw(CPU::ROR),
+            0x6E => self.abs_rw(CPU::ROR),
+            0x7E => self.abs_x_rw(CPU::ROR),
+
+            // COMPARE
+            0xC9 => self.imm(CPU::CMP),
+            0xC5 => self.zpg_read(CPU::CMP),
+            0xD5 => self.zpg_x_read(CPU::CMP),
+            0xCD => self.abs_read(CPU::CMP),
+            0xDD => self.abs_x_read(CPU::CMP),
+            0xD9 => self.abs_y_read(CPU::CMP),
+            0xC1 => self.x_ind_read(CPU::CMP),
+            0xD1 => self.ind_y_read(CPU::CMP),
+
+            0xE0 => self.imm(CPU::CPX),
+            0xE4 => self.zpg_read(CPU::CPX),
+            0xEC => self.abs_read(CPU::CPX),
+
+            0xC0 => self.imm(CPU::CPY),
+            0xC4 => self.zpg_read(CPU::CPY),
+            0xCC => self.abs_read(CPU::CPY),
+
+            // LOAD/STORE
+            0xA9 => self.imm(CPU::LDA),
+            0xA5 => self.zpg_read(CPU::LDA),
+            0xB5 => self.zpg_x_read(CPU::LDA),
+            0xAD => self.abs_read(CPU::LDA),
+            0xBD => self.abs_x_read(CPU::LDA),
+            0xB9 => self.abs_y_read(CPU::LDA),
+            0xA1 => self.x_ind_read(CPU::LDA),
+            0xB1 => self.ind_y_read(CPU::LDA),
+
+            0x85 => self.zpg_write(CPU::STA),
+            0x95 => self.zpg_x_write(CPU::STA),
+            0x8D => self.abs_write(CPU::STA),
+            0x9D => self.abs_x_write(CPU::STA),
+            0x99 => self.abs_y_write(CPU::STA),
+            0x81 => self.x_ind_write(CPU::STA),
+            0x91 => self.ind_y_write(CPU::STA),
+
+            0xA2 => self.imm(CPU::LDX),
+            0xA6 => self.zpg_read(CPU::LDX),
+            0xB6 => self.zpg_y_read(CPU::LDX),
+            0xAE => self.abs_read(CPU::LDX),
+            0xBE => self.abs_y_read(CPU::LDX),
+
+            0x86 => self.zpg_write(CPU::STX),
+            0x96 => self.zpg_y_write(CPU::STX),
+            0x8E => self.abs_write(CPU::STX),
+
+            0xA0 => self.imm(CPU::LDY),
+            0xA4 => self.zpg_read(CPU::LDY),
+            0xB4 => self.zpg_x_read(CPU::LDY),
+            0xAC => self.abs_read(CPU::LDY),
+            0xBC => self.abs_x_read(CPU::LDY),
+
+            0x84 => self.zpg_write(CPU::STY),
+            0x94 => self.zpg_x_write(CPU::STY),
+            0x8C => self.abs_write(CPU::STY),
+
+            // BITWISE
+            0x29 => self.imm(CPU::AND),
+            0x25 => self.zpg_read(CPU::AND),
+            0x35 => self.zpg_x_read(CPU::AND),
+            0x2D => self.abs_read(CPU::AND),
+            0x3D => self.abs_x_read(CPU::AND),
+            0x39 => self.abs_y_read(CPU::AND),
+            0x21 => self.x_ind_read(CPU::AND),
+            0x31 => self.ind_y_read(CPU::AND),
+
+            0x09 => self.imm(CPU::ORA),
+            0x05 => self.zpg_read(CPU::ORA),
+            0x15 => self.zpg_x_read(CPU::ORA),
+            0x0D => self.abs_read(CPU::ORA),
+            0x1D => self.abs_x_read(CPU::ORA),
+            0x19 => self.abs_y_read(CPU::ORA),
+            0x01 => self.x_ind_read(CPU::ORA),
+            0x11 => self.ind_y_read(CPU::ORA),
+
+            0x49 => self.imm(CPU::EOR),
+            0x45 => self.zpg_read(CPU::EOR),
+            0x55 => self.zpg_x_read(CPU::EOR),
+            0x4D => self.abs_read(CPU::EOR),
+            0x5D => self.abs_x_read(CPU::EOR),
+            0x59 => self.abs_y_read(CPU::EOR),
+            0x41 => self.x_ind_read(CPU::EOR),
+            0x51 => self.ind_y_read(CPU::EOR),
+
+            0x24 => self.zpg_read(CPU::BIT),
+            0x2C => self.abs_read(CPU::BIT),
+
+            // ADD/SUB
+            0x69 => self.imm(CPU::ADC),
+            0x65 => self.zpg_read(CPU::ADC),
+            0x75 => self.zpg_x_read(CPU::ADC),
+            0x6D => self.abs_read(CPU::ADC),
+            0x7D => self.abs_x_read(CPU::ADC),
+            0x79 => self.abs_y_read(CPU::ADC),
+            0x61 => self.x_ind_read(CPU::ADC),
+            0x71 => self.ind_y_read(CPU::ADC),
+
+            0xE9 => self.imm(CPU::SBC),
+            0xE5 => self.zpg_read(CPU::SBC),
+            0xF5 => self.zpg_x_read(CPU::SBC),
+            0xED => self.abs_read(CPU::SBC),
+            0xFD => self.abs_x_read(CPU::SBC),
+            0xF9 => self.abs_y_read(CPU::SBC),
+            0xE1 => self.x_ind_read(CPU::SBC),
+            0xF1 => self.ind_y_read(CPU::SBC),
+
+            // FLAGS
+            0x18 => self.imp(|cpu| cpu.P &= 0b11111110),
+            0x38 => self.imp(|cpu| cpu.P |= 0b00000001),
+            0x58 => self.imp(|cpu| cpu.P &= 0b11111011),
+            0x78 => self.imp(|cpu| cpu.P |= 0b00000100),
+            0xB8 => self.imp(|cpu| cpu.P &= 0b10111111),
+            0xD8 => self.imp(|cpu| cpu.P &= 0b11110111),
+            0xF8 => self.imp(|cpu| cpu.P |= 0b00001000),
+
+            0x10 => self.branch(|p| p & 0b10000000 == 0),
+            0x30 => self.branch(|p| p & 0b10000000 != 0),
+            0x50 => self.branch(|p| p & 0b01000000 == 0),
+            0x70 => self.branch(|p| p & 0b01000000 != 0),
+            0x90 => self.branch(|p| p & 0b00000001 == 0),
+            0xB0 => self.branch(|p| p & 0b00000001 != 0),
+            0xD0 => self.branch(|p| p & 0b00000010 == 0),
+            0xF0 => self.branch(|p| p & 0b00000010 != 0),
+
+            // ILLEGAL
+            0x1A | 0x3A | 0x5A | 0x7A | 0xDA | 0xFA => self.imp(|_| ()),
+            0x80 | 0x82 | 0x89 | 0xC2 | 0xE2 => self.imm(|_, _| ()),
+            0x04 | 0x44 | 0x64 => self.zpg_read(|_, _| ()),
+            0x14 | 0x34 | 0x54 | 0x74 | 0xD4 | 0xF4 => self.zpg_x_read(|_, _| ()),
+            0x0C => self.abs_read(|_, _| ()),
+            0x1C | 0x3C | 0x5C | 0x7C | 0xDC | 0xFC => self.abs_x_read(|_, _| ()),
+
+            0xA7 => self.zpg_read(CPU::LAX),
+            0xB7 => self.zpg_y_read(CPU::LAX),
+            0xAF => self.abs_read(CPU::LAX),
+            0xBF => self.abs_y_read(CPU::LAX),
+            0xA3 => self.x_ind_read(CPU::LAX),
+            0xB3 => self.ind_y_read(CPU::LAX),
+
+            0x87 => self.zpg_write(CPU::SAX),
+            0x97 => self.zpg_y_write(CPU::SAX),
+            0x8F => self.abs_write(CPU::SAX),
+            0x83 => self.x_ind_write(CPU::SAX),
+
+            0xEB => self.imm(CPU::SBC),
+
+            0xC7 => self.zpg_rw(CPU::DCP),
+            0xD7 => self.zpg_x_rw(CPU::DCP),
+            0xCF => self.abs_rw(CPU::DCP),
+            0xDF => self.abs_x_rw(CPU::DCP),
+            0xDB => self.abs_y_rw(CPU::DCP),
+            0xC3 => self.x_ind_rw(CPU::DCP),
+            0xD3 => self.ind_y_rw(CPU::DCP),
+
+            0xE7 => self.zpg_rw(CPU::ISC),
+            0xF7 => self.zpg_x_rw(CPU::ISC),
+            0xEF => self.abs_rw(CPU::ISC),
+            0xFF => self.abs_x_rw(CPU::ISC),
+            0xFB => self.abs_y_rw(CPU::ISC),
+            0xE3 => self.x_ind_rw(CPU::ISC),
+            0xF3 => self.ind_y_rw(CPU::ISC),
+
+            0x07 => self.zpg_rw(CPU::SLO),
+            0x17 => self.zpg_x_rw(CPU::SLO),
+            0x0F => self.abs_rw(CPU::SLO),
+            0x1F => self.abs_x_rw(CPU::SLO),
+            0x1B => self.abs_y_rw(CPU::SLO),
+            0x03 => self.x_ind_rw(CPU::SLO),
+            0x13 => self.ind_y_rw(CPU::SLO),
+
+            0x27 => self.zpg_rw(CPU::RLA),
+            0x37 => self.zpg_x_rw(CPU::RLA),
+            0x2F => self.abs_rw(CPU::RLA),
+            0x3F => self.abs_x_rw(CPU::RLA),
+            0x3B => self.abs_y_rw(CPU::RLA),
+            0x23 => self.x_ind_rw(CPU::RLA),
+            0x33 => self.ind_y_rw(CPU::RLA),
+
+            0x47 => self.zpg_rw(CPU::SRE),
+            0x57 => self.zpg_x_rw(CPU::SRE),
+            0x4F => self.abs_rw(CPU::SRE),
+            0x5F => self.abs_x_rw(CPU::SRE),
+            0x5B => self.abs_y_rw(CPU::SRE),
+            0x43 => self.x_ind_rw(CPU::SRE),
+            0x53 => self.ind_y_rw(CPU::SRE),
+
+            0x67 => self.zpg_rw(CPU::RRA),
+            0x77 => self.zpg_x_rw(CPU::RRA),
+            0x6F => self.abs_rw(CPU::RRA),
+            0x7F => self.abs_x_rw(CPU::RRA),
+            0x7B => self.abs_y_rw(CPU::RRA),
+            0x63 => self.x_ind_rw(CPU::RRA),
+            0x73 => self.ind_y_rw(CPU::RRA),
+
+            _ => todo!("instr 0x{:02X}", op),
         }
     }
-    const fn instruction<A: Addressable, const S: Micro>() -> fn(&mut NES, A) {
-        match S {
-            Micro::ASL => |cpu, addr| {
-                let data = addr.read(cpu);
-                addr.write(cpu, data);
 
-                cpu.P &= 0b11111110;
-                cpu.P |= data >> 7;
-                let data = cpu.flags(data << 1);
-                addr.write(cpu, data);
-            },
-            Micro::LSR => |cpu, addr| {
-                let data = addr.read(cpu);
-                addr.write(cpu, data);
-
-                cpu.P &= 0b11111110;
-                cpu.P |= data & 1;
-                let data = cpu.flags(data >> 1);
-                addr.write(cpu, data);
-            },
-            Micro::ROL => |cpu, addr| {
-                let data = addr.read(cpu);
-                addr.write(cpu, data);
-
-                let carry = cpu.P & 1;
-                cpu.P &= 0b11111110;
-                cpu.P |= data >> 7;
-                let data = cpu.flags(data << 1 | carry);
-                addr.write(cpu, data);
-            },
-            Micro::ROR => |cpu, addr| {
-                let data = addr.read(cpu);
-                addr.write(cpu, data);
-
-                let carry = cpu.P << 7;
-                cpu.P &= 0b11111110;
-                cpu.P |= data & 1;
-                let data = cpu.flags(data >> 1 | carry);
-                addr.write(cpu, data);
-            },
-            Micro::INC => |cpu, addr| {
-                let data = addr.read(cpu);
-                addr.write(cpu, data);
-                let data = cpu.flags(data.wrapping_add(1));
-                addr.write(cpu, data);
-            },
-            Micro::DEC => |cpu, addr| {
-                let data = addr.read(cpu);
-                addr.write(cpu, data);
-                let data = cpu.flags(data.wrapping_sub(1));
-                addr.write(cpu, data);
-            },
-            Micro::AND => |cpu, addr| {
-                cpu.A &= addr.read(cpu);
-                cpu.flags(cpu.A);
-            },
-            Micro::EOR => |cpu, addr| {
-                cpu.A ^= addr.read(cpu);
-                cpu.flags(cpu.A);
-            },
-            Micro::ORA => |cpu, addr| {
-                cpu.A |= addr.read(cpu);
-                cpu.flags(cpu.A);
-            },
-            Micro::BIT => |cpu, addr| {
-                let data = addr.read(cpu);
-
-                cpu.P &= 0b00111101;
-
-                // Negative and oVerflow flags
-                cpu.P |= data & 0b11000000;
-
-                // Zero flag
-                if cpu.A & data == 0 {
-                    cpu.P |= 0b00000010;
-                }
-            },
-            Micro::ADC => |cpu, addr| {
-                let data = addr.read(cpu);
-                let (v0, c0) = cpu.A.overflowing_add(data);
-                let (v1, c1) = v0.overflowing_add(cpu.P & 1);
-
-                cpu.P &= 0b10111110;
-
-                // carry flag
-                if c0 || c1 {
-                    cpu.P |= 0b00000001;
-                }
-
-                // overflow flag
-                let sa = cpu.A & 0b10000000;
-                let sb = data & 0b10000000;
-                let sv = v1 & 0b10000000;
-                if sa == sb && sb != sv {
-                    cpu.P |= 0b01000000;
-                }
-
-                cpu.A = v1;
-                cpu.flags(cpu.A);
-            },
-            Micro::SBC => |cpu, addr| {
-                let data = addr.read(cpu);
-                let (v0, c0) = cpu.A.overflowing_sub(data);
-                let (v1, c1) = v0.overflowing_sub(cpu.P & 1 ^ 1);
-
-                cpu.P &= 0b10111110;
-
-                // borrow flag
-                if !(c0 || c1) {
-                    cpu.P |= 0b00000001;
-                }
-
-                // overflow flag
-                let sa = cpu.A & 0b10000000;
-                let sb = data & 0b10000000;
-                let sv = v1 & 0b10000000;
-                if sa != sb && sb == sv {
-                    cpu.P |= 0b01000000;
-                }
-
-                cpu.A = v1;
-                cpu.flags(cpu.A);
-            },
-            Micro::STA => |cpu, addr| addr.write(cpu, cpu.A),
-            Micro::STY => |cpu, addr| addr.write(cpu, cpu.Y),
-            Micro::STX => |cpu, addr| addr.write(cpu, cpu.X),
-            Micro::LDA => |cpu, addr| cpu.A = addr.read_flags(cpu),
-            Micro::LDY => |cpu, addr| cpu.Y = addr.read_flags(cpu),
-            Micro::LDX => |cpu, addr| cpu.X = addr.read_flags(cpu),
-            Micro::CPX => |cpu, addr| addr.compare(cpu, cpu.X),
-            Micro::CPY => |cpu, addr| addr.compare(cpu, cpu.Y),
-            Micro::CMP => |cpu, addr| addr.compare(cpu, cpu.A),
-            Micro::NOP => |cpu, addr| addr.poke(cpu),
-
-            Micro::SEC => |cpu, _addr| cpu.P |= 0b00000001,
-            Micro::SEI => |cpu, _addr| cpu.P |= 0b00000100,
-            Micro::SED => |cpu, _addr| cpu.P |= 0b00001000,
-            Micro::CLC => |cpu, _addr| cpu.P &= 0b11111110,
-            Micro::CLI => |cpu, _addr| cpu.P &= 0b11111011,
-            Micro::CLD => |cpu, _addr| cpu.P &= 0b11110111,
-            Micro::CLV => |cpu, _addr| cpu.P &= 0b10111111,
-            Micro::INX => |cpu, _addr| cpu.X = cpu.flags(cpu.X.wrapping_add(1)),
-            Micro::DEX => |cpu, _addr| cpu.X = cpu.flags(cpu.X.wrapping_sub(1)),
-            Micro::INY => |cpu, _addr| cpu.Y = cpu.flags(cpu.Y.wrapping_add(1)),
-            Micro::DEY => |cpu, _addr| cpu.Y = cpu.flags(cpu.Y.wrapping_sub(1)),
-            Micro::TAX => |cpu, _addr| cpu.X = cpu.flags(cpu.A),
-            Micro::TXA => |cpu, _addr| cpu.A = cpu.flags(cpu.X),
-            Micro::TAY => |cpu, _addr| cpu.Y = cpu.flags(cpu.A),
-            Micro::TYA => |cpu, _addr| cpu.A = cpu.flags(cpu.Y),
-            Micro::TSX => |cpu, _addr| cpu.X = cpu.flags(cpu.SP),
-            Micro::TXS => |cpu, _addr| cpu.SP = cpu.X,
-
-            Micro::SLO => |cpu, addr| {
-                let data = addr.read(cpu);
-
-                // ASL
-                addr.write(cpu, data);
-
-                cpu.P &= 0b11111110;
-                cpu.P |= data >> 7;
-                let data = data << 1;
-                addr.write(cpu, data);
-
-                // ORA
-                cpu.A |= data;
-                cpu.flags(cpu.A);
-            },
-            Micro::SRE => |cpu, addr| {
-                let data = addr.read(cpu);
-
-                // LSR
-                addr.write(cpu, data);
-
-                cpu.P &= 0b11111110;
-                cpu.P |= data & 1;
-                let data = data >> 1;
-                addr.write(cpu, data);
-
-                // EOR
-                cpu.A ^= data;
-                cpu.flags(cpu.A);
-            },
-            Micro::RLA => |cpu, addr| {
-                let data = addr.read(cpu);
-
-                // ROL
-                addr.write(cpu, data);
-
-                let carry = cpu.P & 1;
-                cpu.P &= 0b11111110;
-                cpu.P |= data >> 7;
-                let data = data << 1 | carry;
-                addr.write(cpu, data);
-
-                // AND
-                cpu.A &= data;
-                cpu.flags(cpu.A);
-            },
-            Micro::RRA => |cpu, addr| {
-                let data = addr.read(cpu);
-
-                // ROR
-                addr.write(cpu, data);
-
-                let carry = cpu.P << 7;
-                cpu.P &= 0b11111110;
-                cpu.P |= data & 1;
-                let data = cpu.flags(data >> 1 | carry);
-                addr.write(cpu, data);
-
-                // ADC
-                let (v0, c0) = cpu.A.overflowing_add(data);
-                let (v1, c1) = v0.overflowing_add(cpu.P & 1);
-
-                cpu.P &= 0b10111110;
-
-                // carry flag
-                if c0 || c1 {
-                    cpu.P |= 0b00000001;
-                }
-
-                // overflow flag
-                let sa = cpu.A & 0b10000000;
-                let sb = data & 0b10000000;
-                let sv = v1 & 0b10000000;
-                if sa == sb && sb != sv {
-                    cpu.P |= 0b01000000;
-                }
-
-                cpu.A = v1;
-                cpu.flags(cpu.A);
-            },
-            Micro::ISC => |cpu, addr| {
-                let data = addr.read(cpu);
-
-                // INC
-                addr.write(cpu, data);
-                let data = data.wrapping_add(1);
-                addr.write(cpu, data);
-
-                // SBC
-                let (v0, c0) = cpu.A.overflowing_sub(data);
-                let (v1, c1) = v0.overflowing_sub(cpu.P & 1 ^ 1);
-
-                cpu.P &= 0b10111110;
-
-                // borrow flag
-                if !(c0 || c1) {
-                    cpu.P |= 0b00000001;
-                }
-
-                // overflow flag
-                let sa = cpu.A & 0b10000000;
-                let sb = data & 0b10000000;
-                let sv = v1 & 0b10000000;
-                if sa != sb && sb == sv {
-                    cpu.P |= 0b01000000;
-                }
-
-                cpu.A = v1;
-                cpu.flags(cpu.A);
-            },
-            Micro::DCP => |cpu, addr| {
-                let data = addr.read(cpu);
-
-                // DEC
-                addr.write(cpu, data);
-                let data = data.wrapping_sub(1);
-                addr.write(cpu, data);
-
-                // CMP
-                let (val, carry) = cpu.A.overflowing_sub(data);
-                cpu.P &= 0b11111110;
-                if !carry {
-                    cpu.P |= 0b00000001;
-                }
-                cpu.flags(val);
-            },
-            Micro::LAX => |cpu, addr| {
-                cpu.A = addr.read_flags(cpu);
-                cpu.X = cpu.A;
-            },
-            Micro::SAX => |cpu, addr| addr.write(cpu, cpu.A & cpu.X),
-
-            Micro::LAS => |_cpu, _addr| todo!(),
-            Micro::TAS => |_cpu, _addr| todo!(),
-            Micro::SHA => |_cpu, _addr| todo!(),
-            Micro::SHY => |_cpu, _addr| todo!(),
-            Micro::SHX => |_cpu, _addr| todo!(),
-            Micro::ANE => |_cpu, _addr| todo!(),
-            Micro::LXA => |_cpu, _addr| todo!(),
-        }
+    // ADDRESSING
+    #[inline(always)]
+    fn zpg(&mut self) -> u8 {
+        // just the same as a single read cycle
+        self.cycle_read_pc()
     }
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ConstParamTy)]
-pub enum Micro {
-    // legal
-    ASL,
-    LSR,
-    ROL,
-    ROR,
-    INC,
-    DEC,
+    #[inline(always)]
+    fn zpg_index(&mut self, index: u8) -> u8 {
+        let addr = self.cycle_read_pc();
+        self.cycle();
+        addr.wrapping_add(index)
+    }
+    #[inline(always)]
+    fn abs(&mut self) -> u16 {
+        let lo = self.cycle_read_pc();
+        let hi = self.cycle_read_pc();
+        u16::from_le_bytes([lo, hi])
+    }
+    #[inline(always)]
+    fn abs_index(&mut self, write: bool, index: u8) -> u16 {
+        let lo = self.cycle_read_pc().wrapping_add(index);
+        let hi = self.cycle_read_pc();
+        let addr = u16::from_le_bytes([lo, hi]);
 
-    AND,
-    EOR,
-    ORA,
-    BIT,
-    ADC,
-    SBC,
-    STA,
-    STY,
-    STX,
-    LDA,
-    LDY,
-    LDX,
-    CPX,
-    CPY,
-    CMP,
-
-    // implied
-    NOP,
-
-    CLC,
-    SEC,
-    CLI,
-    SEI,
-    CLV,
-    CLD,
-    SED,
-
-    INX,
-    DEX,
-    INY,
-    DEY,
-
-    TAX,
-    TXA,
-    TAY,
-    TYA,
-    TSX,
-    TXS,
-
-    // illegal
-    SLO,
-    SRE,
-    RLA,
-    RRA,
-    ISC,
-    DCP,
-    LAX,
-    SAX,
-    LAS,
-
-    // unstable
-    TAS,
-    SHA,
-    SHY,
-    SHX,
-
-    // highly unstable
-    ANE,
-    LXA,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ConstParamTy)]
-pub enum Index {
-    X,
-    Y,
-}
-
-impl Index {
-    const fn op<const OP: u8>() -> Self {
-        if OP & 0b11000010 == 0b10000010 {
-            // exception for STX and LDX
-            Self::Y
+        // Fix high byte
+        if lo < index {
+            self.cycle_read(addr);
+            addr.wrapping_add(0x0100)
         } else {
-            Self::X
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ConstParamTy)]
-pub enum Mode {
-    Accumulator,
-    Implied,
-    Immediate,
-    Absolute,
-    ZeroPage,
-    ZeroPageIndexed(Index),
-    AbsoluteIndexed(Index),
-    IndexedIndirect,
-    IndirectIndexed,
-    Jam,
-}
-
-// weird generic shit
-// see https://github.com/rust-lang/rust/issues/82509#issuecomment-1165533546
-struct ModeEval<const N: Mode>;
-struct MicroEval<const N: Micro>;
-
-const fn instruction<const OP: u8>() -> Instruction
-where
-    ModeEval<{ Mode::from::<OP>() }>: Sized,
-    MicroEval<{ Micro::from::<OP>() }>: Sized,
-{
-    match OP {
-        0x10 => branch::<0b10000000, true>(),
-        0x30 => branch::<0b10000000, false>(),
-        0x50 => branch::<0b01000000, true>(),
-        0x70 => branch::<0b01000000, false>(),
-        0x90 => branch::<0b00000001, true>(),
-        0xB0 => branch::<0b00000001, false>(),
-        0xD0 => branch::<0b00000010, true>(),
-        0xF0 => branch::<0b00000010, false>(),
-
-        0x00 => |cpu| {
-            // BRK
-            cpu.read_pc();
-            cpu.push_hi();
-            cpu.push_lo();
-
-            // poll address
-            cpu.poll();
-            let addr = if cpu.nmi_sample {
-                cpu.nmi_sample = false;
-                0xFFFA
-            } else if cpu.res_sample {
-                cpu.res_sample = false;
-                0xFFFC
-            } else {
-                0xFFFE
-            };
-
-            let b = if cpu.hardware_interrupt {
-                // B flag clear
-                0b00100000
-            } else {
-                // B flag set
-                0b00110000
-            };
-            cpu.push(cpu.P | b);
-
-            // interrupt disable
-            cpu.P |= 0b00000100;
-
-            let lo = cpu.read_addr(addr);
-            let hi = cpu.read_addr(addr | 1);
-            cpu.PC = u16::from(lo) | u16::from(hi) << 8;
-            cpu.hardware_interrupt = false;
-
-            // no polling interrupts
-            // immediately execute next instruction
-        },
-        0x08 => |cpu| {
-            // PHP
-            cpu.poke_pc();
-
-            cpu.poll();
-
-            cpu.push(cpu.P | 0b00110000);
-        },
-        0x20 => |cpu| {
-            // JSR
-            let lo = cpu.read_pc();
-            cpu.peek();
-            cpu.push_hi();
-            cpu.push_lo();
-
-            cpu.poll();
-
-            let hi = cpu.read_pc();
-            cpu.PC = u16::from(lo) | u16::from(hi) << 8;
-        },
-        0x28 => |cpu| {
-            // PLP
-            cpu.poke_pc();
-            cpu.pop();
-
-            cpu.poll();
-
-            cpu.P = cpu.peek() & 0b11001111;
-        },
-        0x40 => |cpu| {
-            // RTI
-            cpu.poke_pc();
-            cpu.pop();
-            cpu.P = cpu.pop() & 0b11001111;
-            let lo = cpu.pop();
-
-            cpu.poll();
-
-            let hi = cpu.peek();
-            cpu.PC = u16::from(lo) | u16::from(hi) << 8;
-        },
-        0x4C => |cpu| {
-            // JMP abs
-            let lo = cpu.read_pc();
-
-            cpu.poll();
-
-            let hi = cpu.read_pc();
-            cpu.PC = u16::from(lo) | u16::from(hi) << 8;
-        },
-        0x60 => |cpu| {
-            // RTS
-            cpu.poke_pc();
-            cpu.pop();
-            let lo = cpu.pop();
-            let hi = cpu.peek();
-            cpu.PC = u16::from(lo) | u16::from(hi) << 8;
-
-            cpu.poll();
-
-            cpu.read_pc();
-        },
-        0x48 => |cpu| {
-            // PHA
-            cpu.poke_pc();
-
-            cpu.poll();
-
-            cpu.push(cpu.A);
-        },
-        0x68 => |cpu| {
-            // PLA
-            cpu.poke_pc();
-            cpu.pop();
-
-            cpu.poll();
-
-            cpu.A = cpu.peek();
-            cpu.flags(cpu.A);
-        },
-        0x6C => |cpu| {
-            // JMP ind
-            let lo = cpu.read_pc();
-            let hi = cpu.read_pc();
-            let addr_lo = u16::from(lo) | u16::from(hi) << 8;
-            let addr_hi = u16::from(lo.wrapping_add(1)) | u16::from(hi) << 8;
-
-            let lo = cpu.read_addr(addr_lo);
-
-            cpu.poll();
-
-            let hi = cpu.read_addr(addr_hi);
-            cpu.PC = u16::from(lo) | u16::from(hi) << 8;
-        },
-
-        0x18 => Mode::instruction::<{ Mode::Implied }, { Micro::CLC }>(),
-        0x38 => Mode::instruction::<{ Mode::Implied }, { Micro::SEC }>(),
-        0x58 => Mode::instruction::<{ Mode::Implied }, { Micro::CLI }>(),
-        0x78 => Mode::instruction::<{ Mode::Implied }, { Micro::SEI }>(),
-        0x88 => Mode::instruction::<{ Mode::Implied }, { Micro::DEY }>(),
-        0x8A => Mode::instruction::<{ Mode::Implied }, { Micro::TXA }>(),
-        0x98 => Mode::instruction::<{ Mode::Implied }, { Micro::TYA }>(),
-        0x9A => Mode::instruction::<{ Mode::Implied }, { Micro::TXS }>(),
-        0xA8 => Mode::instruction::<{ Mode::Implied }, { Micro::TAY }>(),
-        0xAA => Mode::instruction::<{ Mode::Implied }, { Micro::TAX }>(),
-        0xB8 => Mode::instruction::<{ Mode::Implied }, { Micro::CLV }>(),
-        0xBA => Mode::instruction::<{ Mode::Implied }, { Micro::TSX }>(),
-        0xC8 => Mode::instruction::<{ Mode::Implied }, { Micro::INY }>(),
-        0xCA => Mode::instruction::<{ Mode::Implied }, { Micro::DEX }>(),
-        0xD8 => Mode::instruction::<{ Mode::Implied }, { Micro::CLD }>(),
-        0xE8 => Mode::instruction::<{ Mode::Implied }, { Micro::INX }>(),
-        0xEA => Mode::instruction::<{ Mode::Implied }, { Micro::NOP }>(),
-        0xF8 => Mode::instruction::<{ Mode::Implied }, { Micro::SED }>(),
-
-        // illegal
-        0xBB => Mode::instruction::<{ Mode::AbsoluteIndexed(Index::Y) }, { Micro::LAS }>(),
-        0xEB => Mode::instruction::<{ Mode::Immediate }, { Micro::SBC }>(),
-
-        // unstable
-        0x9B => Mode::instruction::<{ Mode::AbsoluteIndexed(Index::Y) }, { Micro::TAS }>(),
-        0x93 => Mode::instruction::<{ Mode::IndirectIndexed }, { Micro::SHA }>(),
-        0x9C => Mode::instruction::<{ Mode::AbsoluteIndexed(Index::X) }, { Micro::SHY }>(),
-        0x9E => Mode::instruction::<{ Mode::AbsoluteIndexed(Index::Y) }, { Micro::SHX }>(),
-        0x9F => Mode::instruction::<{ Mode::AbsoluteIndexed(Index::Y) }, { Micro::SHA }>(),
-
-        // highly unstable
-        0xAB => Mode::instruction::<{ Mode::Immediate }, { Micro::LXA }>(),
-        0x8B => Mode::instruction::<{ Mode::Immediate }, { Micro::ANE }>(),
-
-        _ => Mode::instruction::<{ Mode::from::<OP>() }, { Micro::from::<OP>() }>(),
-    }
-}
-
-impl Mode {
-    const fn from<const OP: u8>() -> Mode {
-        match OP & 0b11101 {
-            0b00000 => {
-                if OP & 0b10000000 == 0 {
-                    Mode::Jam
-                } else {
-                    Mode::Immediate
-                }
+            if write {
+                self.cycle_read(addr);
             }
-            0b00001 => Mode::IndexedIndirect,
-            0b00100 => Mode::ZeroPage,
-            0b00101 => Mode::ZeroPage,
-            0b01000 => Mode::Accumulator,
-            0b01001 => Mode::Immediate,
-            0b01100 => Mode::Absolute,
-            0b01101 => Mode::Absolute,
-            0b10000 => Mode::Jam,
-            0b10001 => Mode::IndirectIndexed,
-            0b10100 => Mode::ZeroPageIndexed(Index::op::<OP>()),
-            0b10101 => Mode::ZeroPageIndexed(Index::op::<OP>()),
-            0b11000 => Mode::Implied,
-            0b11001 => Mode::AbsoluteIndexed(Index::Y),
-            0b11100 => Mode::AbsoluteIndexed(Index::op::<OP>()),
-            0b11101 => Mode::AbsoluteIndexed(Index::op::<OP>()),
-            _ => unreachable!(),
+            addr
         }
     }
-    const fn instruction<const S: Mode, const M: Micro>() -> Instruction {
-        match S {
-            Mode::Accumulator => |cpu| {
-                cpu.poll();
+    #[inline(always)]
+    fn x_indirect(&mut self) -> u16 {
+        let ptr = self.cycle_read_pc();
+        self.cycle();
+        let ptr = ptr.wrapping_add(self.cpu.X);
+        let lo = self.cycle_read_ptr_lo(ptr);
+        let hi = self.cycle_read_ptr_hi(ptr);
+        u16::from_le_bytes([lo, hi])
+    }
+    #[inline(always)]
+    fn indirect_y(&mut self, write: bool) -> u16 {
+        let ptr = self.cycle_read_pc();
+        let lo = self.cycle_read_ptr_lo(ptr).wrapping_add(self.cpu.Y);
+        let hi = self.cycle_read_ptr_hi(ptr);
+        let addr = u16::from_le_bytes([lo, hi]);
 
-                cpu.poke_pc();
-                Micro::instruction::<Accumulator, M>()(cpu, Accumulator());
-            },
-            Mode::Implied => |cpu| {
-                cpu.poll();
-
-                cpu.poke_pc();
-                Micro::instruction::<Implied, M>()(cpu, Implied());
-            },
-            Mode::Immediate => |cpu| {
-                cpu.poll();
-
-                Micro::instruction::<u16, M>()(cpu, cpu.PC);
-                cpu.PC = cpu.PC.wrapping_add(1);
-            },
-            Mode::Absolute => |cpu| {
-                let lo = cpu.read_pc();
-                let hi = cpu.read_pc();
-                let addr = u16::from(lo) | u16::from(hi) << 8;
-
-                cpu.poll();
-
-                Micro::instruction::<u16, M>()(cpu, addr);
-            },
-            Mode::ZeroPage => |cpu| {
-                let addr = cpu.read_pc();
-
-                cpu.poll();
-
-                Micro::instruction::<u8, M>()(cpu, addr);
-            },
-            Mode::ZeroPageIndexed(i) => match i {
-                Index::X => |cpu| {
-                    let ptr = cpu.read_pc();
-                    cpu.read_addr(u16::from(ptr));
-
-                    let addr = ptr.wrapping_add(cpu.X);
-
-                    cpu.poll();
-
-                    Micro::instruction::<u8, M>()(cpu, addr);
-                },
-                Index::Y => |cpu| {
-                    let ptr = cpu.read_pc();
-                    cpu.read_addr(u16::from(ptr));
-
-                    let addr = ptr.wrapping_add(cpu.Y);
-
-                    cpu.poll();
-
-                    Micro::instruction::<u8, M>()(cpu, addr);
-                },
-            },
-            Mode::AbsoluteIndexed(i) => match i {
-                Index::X => |cpu| {
-                    let reg = cpu.X;
-
-                    let lo = cpu.read_pc();
-                    let hi = cpu.read_pc();
-                    let addr = u16::from(lo.wrapping_add(reg)) | u16::from(hi) << 8;
-
-                    if (addr as u8) < reg {
-                        cpu.read_addr(addr);
-
-                        cpu.poll();
-
-                        Micro::instruction::<u16, M>()(cpu, addr.wrapping_add(0x0100));
-                    } else {
-                        match M {
-                            Micro::LDA
-                            | Micro::LDX
-                            | Micro::LDY
-                            | Micro::EOR
-                            | Micro::AND
-                            | Micro::ORA
-                            | Micro::ADC
-                            | Micro::SBC
-                            | Micro::CMP
-                            | Micro::BIT
-                            | Micro::LAX
-                            | Micro::LAS
-                            | Micro::TAS
-                            | Micro::NOP => {} // skip fix cycle
-                            _ => {
-                                cpu.read_addr(addr);
-                            }
-                        }
-
-                        cpu.poll();
-
-                        Micro::instruction::<u16, M>()(cpu, addr);
-                    }
-                },
-                Index::Y => |cpu| {
-                    let reg = cpu.Y;
-
-                    let lo = cpu.read_pc();
-                    let hi = cpu.read_pc();
-                    let addr = u16::from(lo.wrapping_add(reg)) | u16::from(hi) << 8;
-
-                    if (addr as u8) < reg {
-                        cpu.read_addr(addr);
-
-                        cpu.poll();
-
-                        Micro::instruction::<u16, M>()(cpu, addr.wrapping_add(0x0100));
-                    } else {
-                        match M {
-                            Micro::LDA
-                            | Micro::LDX
-                            | Micro::LDY
-                            | Micro::EOR
-                            | Micro::AND
-                            | Micro::ORA
-                            | Micro::ADC
-                            | Micro::SBC
-                            | Micro::CMP
-                            | Micro::BIT
-                            | Micro::LAX
-                            | Micro::LAS
-                            | Micro::TAS
-                            | Micro::NOP => {} // skip fix cycle
-                            _ => {
-                                cpu.read_addr(addr);
-                            }
-                        }
-
-                        cpu.poll();
-
-                        Micro::instruction::<u16, M>()(cpu, addr);
-                    }
-                },
-            },
-            Mode::IndexedIndirect => |cpu| {
-                let ptr = cpu.read_pc();
-                cpu.read_ptr_lo(ptr);
-
-                let ptr = ptr.wrapping_add(cpu.X);
-                let lo = cpu.read_ptr_lo(ptr);
-                let hi = cpu.read_ptr_hi(ptr);
-                let addr = u16::from(lo) | u16::from(hi) << 8;
-
-                cpu.poll();
-
-                Micro::instruction::<u16, M>()(cpu, addr);
-            },
-            Mode::IndirectIndexed => |cpu| {
-                let ptr = cpu.read_pc();
-                let lo = cpu.read_ptr_lo(ptr);
-                let hi = cpu.read_ptr_hi(ptr);
-                let addr = u16::from(lo.wrapping_add(cpu.Y)) | u16::from(hi) << 8;
-
-                if (addr as u8) < cpu.Y {
-                    cpu.read_addr(addr);
-
-                    cpu.poll();
-
-                    Micro::instruction::<u16, M>()(cpu, addr.wrapping_add(0x0100));
-                } else {
-                    match M {
-                        Micro::LDA
-                        | Micro::LDX
-                        | Micro::LDY
-                        | Micro::EOR
-                        | Micro::AND
-                        | Micro::ORA
-                        | Micro::ADC
-                        | Micro::SBC
-                        | Micro::CMP
-                        | Micro::BIT
-                        | Micro::LAX
-                        | Micro::LAS
-                        | Micro::TAS
-                        | Micro::NOP => {} // skip fix cycle
-                        _ => {
-                            cpu.read_addr(addr);
-                        }
-                    }
-
-                    cpu.poll();
-
-                    Micro::instruction::<u16, M>()(cpu, addr);
-                }
-            },
-            Mode::Jam => |_cpu| {
-                panic!("jam instruction");
-            },
+        // Fix high byte
+        if lo < self.cpu.Y {
+            self.cycle_read(addr);
+            addr.wrapping_add(0x0100)
+        } else {
+            if write {
+                self.cycle_read(addr);
+            }
+            addr
         }
     }
-}
 
-const fn branch<const MASK: u8, const ZERO: bool>() -> Instruction {
-    |cpu| {
-        if (cpu.P & MASK == 0) == ZERO {
-            let oper = cpu.read_pc();
-            let addr = cpu.PC.wrapping_add_signed(i16::from(oper as i8));
+    // MODES
+    fn branch(&mut self, p: fn(u8) -> bool) {
+        if p(self.cpu.P) {
+            let oper = self.cycle_read_pc();
+            let [lo, hi] = self.cpu.PC.to_le_bytes();
 
-            cpu.poke_pc();
-            cpu.PC = (cpu.PC & 0xFF00) | (addr & 0x00FF);
+            let lo = lo.wrapping_add(oper);
+            let fixed = self.cpu.PC.wrapping_add_signed(i16::from(oper as i8));
 
-            if cpu.PC != addr {
+            self.cycle_poke_pc();
+            self.cpu.PC = u16::from_le_bytes([lo, hi]);
+
+            if self.cpu.PC != fixed {
                 // fix PC
-                cpu.poll();
-                cpu.poke_pc();
-                cpu.PC = addr;
+                self.poll_interrupts();
+                self.cycle_poke_pc();
+                self.cpu.PC = fixed;
             } else {
                 // no polling interrupts
                 // immediately execute next instruction
             }
         } else {
-            cpu.poll();
-            cpu.read_pc();
+            self.poll_interrupts();
+            self.cycle_read_pc();
         }
+    }
+
+    fn imp(&mut self, f: fn(&mut CPU)) {
+        self.poll_interrupts();
+        self.cycle_poke_pc();
+        f(&mut self.cpu);
+    }
+    fn imp_push(&mut self, f: fn(&mut CPU) -> u8) {
+        self.cycle_poke_pc();
+        self.poll_interrupts();
+        let data = f(&mut self.cpu);
+        self.cycle_push(data);
+    }
+    fn imp_pop(&mut self, f: fn(&mut CPU, u8)) {
+        self.cycle_poke_pc();
+        self.cycle_pop();
+        self.poll_interrupts();
+        let data = self.cycle_peek();
+        f(&mut self.cpu, data);
+    }
+    fn imm(&mut self, f: fn(&mut CPU, u8)) {
+        self.poll_interrupts();
+        let data = self.cycle_read_pc();
+        f(&mut self.cpu, data);
+    }
+    fn acc(&mut self, f: fn(&mut CPU, u8) -> u8) {
+        self.poll_interrupts();
+        self.cycle_poke_pc();
+        let data = self.cpu.A;
+        let data = f(&mut self.cpu, data);
+        self.cpu.A = data;
+    }
+
+    mode_zpg!(zpg_read, zpg_write, zpg_rw, zpg());
+    mode_zpg!(zpg_x_read, zpg_x_write, zpg_x_rw, zpg_index(X));
+    mode_zpg!(zpg_y_read, zpg_y_write, _zpg_y_rw, zpg_index(Y));
+
+    mode_abs!(abs_read, abs_write, abs_rw, abs());
+    mode_abs!(abs_x_read, abs_x_write, abs_x_rw, abs_index(w, X));
+    mode_abs!(abs_y_read, abs_y_write, abs_y_rw, abs_index(w, Y));
+    mode_abs!(x_ind_read, x_ind_write, x_ind_rw, x_indirect());
+    mode_abs!(ind_y_read, ind_y_write, ind_y_rw, indirect_y(w));
+
+    // READ/WRITE CYCLES
+    #[inline(always)]
+    fn cycle_read(&mut self, addr: u16) -> u8 {
+        self.cycle();
+        self.read(addr)
+    }
+    #[inline(always)]
+    fn cycle_write(&mut self, addr: u16, data: u8) {
+        self.cycle();
+        if !self.cpu.res_sample {
+            self.write(addr, data);
+        } else {
+            self.read(addr);
+        }
+    }
+    #[inline(always)]
+    fn cycle_read_zpg(&mut self, addr: u8) -> u8 {
+        self.cycle();
+        self.read_internal(u16::from(addr))
+    }
+    #[inline(always)]
+    fn cycle_write_zpg(&mut self, addr: u8, data: u8) {
+        self.cycle();
+        if !self.cpu.res_sample {
+            self.write_internal(u16::from(addr), data);
+        }
+    }
+    #[inline(always)]
+    fn cycle_read_ptr_lo(&mut self, ptr: u8) -> u8 {
+        self.cycle();
+        self.read_internal(u16::from(ptr))
+    }
+    #[inline(always)]
+    fn cycle_read_ptr_hi(&mut self, ptr: u8) -> u8 {
+        self.cycle();
+        self.read_internal(u16::from(ptr.wrapping_add(1)))
+    }
+    #[inline(always)]
+    fn cycle_read_pc(&mut self) -> u8 {
+        self.cycle();
+        let d = self.read(self.cpu.PC);
+        self.cpu.PC += u16::from(!self.cpu.hardware_interrupt);
+        d
+    }
+    #[inline(always)]
+    fn cycle_poke_pc(&mut self) {
+        self.cycle();
+        self.read(self.cpu.PC);
+    }
+    #[inline(always)]
+    fn cycle_push(&mut self, data: u8) {
+        self.cycle();
+        if !self.cpu.res_sample {
+            self.write_internal(0x0100 | u16::from(self.cpu.SP), data);
+        }
+        self.cpu.SP = self.cpu.SP.wrapping_sub(1);
+    }
+
+    #[inline(always)]
+    fn cycle_push_pc_lo(&mut self) { self.cycle_push(self.cpu.PC as u8); }
+    #[inline(always)]
+    fn cycle_push_pc_hi(&mut self) { self.cycle_push((self.cpu.PC >> 8) as u8); }
+
+    #[inline(always)]
+    fn cycle_peek(&mut self) -> u8 {
+        self.cycle();
+        self.read_internal(0x0100 | u16::from(self.cpu.SP))
+    }
+    #[inline(always)]
+    fn cycle_pop(&mut self) -> u8 {
+        let data = self.cycle_peek();
+        self.cpu.SP = self.cpu.SP.wrapping_add(1);
+        data
     }
 }
 
-pub const INSTRUCTIONS: Instructions = repeated!(
-    %%s prelude [ prelude s%%
-    for op in [0;255] {
-        instruction::<%%op%%>(),
+impl CPU {
+    pub fn new() -> Self {
+        CPU {
+            PC: 0,
+            SP: 0,
+            P: 0,
+            A: 0,
+            X: 0,
+            Y: 0,
+            irq_sample: false,
+            nmi_sample: false,
+            res_sample: true, // reset on startup
+            hardware_interrupt: false,
+        }
     }
-    %%e postlude ] postlude e%%
-);
+    pub fn reset(&mut self) {
+        self.res_sample = true;
+        self.SP = 0;
+    }
+
+    pub fn nmi(&mut self) { self.nmi_sample = true; }
+    pub fn irq(&mut self) { self.irq_sample = true; }
+}
+
+#[allow(non_snake_case)]
+impl CPU {
+    // HELPER FUNCTIONS
+    fn flags(&mut self, val: u8) -> u8 {
+        self.P &= 0b01111101;
+
+        // negative flag
+        self.P |= val & 0b10000000;
+
+        // zero flag
+        if val == 0 {
+            self.P |= 0b00000010;
+        }
+
+        val
+    }
+    fn compare(&mut self, data: u8, reg: u8) {
+        let (val, carry) = reg.overflowing_sub(data);
+        self.P &= 0b11111110;
+        if !carry {
+            self.P |= 0b00000001;
+        }
+        self.flags(val);
+    }
+
+    // COMMON MICRO-INSTRUCTIONS
+    fn LDA(&mut self, val: u8) { self.A = self.flags(val) }
+    fn LDX(&mut self, val: u8) { self.X = self.flags(val) }
+    fn LDY(&mut self, val: u8) { self.Y = self.flags(val) }
+    fn STA(&mut self) -> u8 { self.A }
+    fn STX(&mut self) -> u8 { self.X }
+    fn STY(&mut self) -> u8 { self.Y }
+
+    fn BIT(&mut self, val: u8) {
+        self.P &= 0b00111101;
+        if self.A & val == 0 {
+            self.P |= 0b00000010;
+        }
+        self.P |= val & 0b11000000;
+    }
+
+    fn AND(&mut self, val: u8) { self.A = self.flags(self.A & val) }
+    fn ORA(&mut self, val: u8) { self.A = self.flags(self.A | val) }
+    fn EOR(&mut self, val: u8) { self.A = self.flags(self.A ^ val) }
+
+    fn CMP(&mut self, val: u8) { self.compare(val, self.A) }
+    fn CPX(&mut self, val: u8) { self.compare(val, self.X) }
+    fn CPY(&mut self, val: u8) { self.compare(val, self.Y) }
+
+    fn INC(&mut self, val: u8) -> u8 { self.flags(val.wrapping_add(1)) }
+    fn DEC(&mut self, val: u8) -> u8 { self.flags(val.wrapping_sub(1)) }
+
+    fn ADC(&mut self, val: u8) {
+        let (v0, c0) = self.A.overflowing_add(val);
+        let (v1, c1) = v0.overflowing_add(self.P & 1);
+
+        self.P &= 0b10111110;
+
+        // carry flag
+        if c0 || c1 {
+            self.P |= 0b00000001;
+        }
+
+        // overflow flag
+        let sa = self.A & 0b10000000;
+        let sb = val & 0b10000000;
+        let sv = v1 & 0b10000000;
+        if sa == sb && sb != sv {
+            self.P |= 0b01000000;
+        }
+
+        self.A = self.flags(v1);
+    }
+    fn SBC(&mut self, val: u8) {
+        let (v0, c0) = self.A.overflowing_sub(val);
+        let (v1, c1) = v0.overflowing_sub(self.P & 1 ^ 1);
+
+        self.P &= 0b10111110;
+
+        // borrow flag
+        if !(c0 || c1) {
+            self.P |= 0b00000001;
+        }
+
+        // overflow flag
+        let sa = self.A & 0b10000000;
+        let sb = val & 0b10000000;
+        let sv = v1 & 0b10000000;
+        if sa != sb && sb == sv {
+            self.P |= 0b01000000;
+        }
+
+        self.A = self.flags(v1);
+    }
+
+    fn ASL(&mut self, val: u8) -> u8 {
+        self.P &= 0b11111110;
+        self.P |= val >> 7;
+        self.flags(val << 1)
+    }
+    fn LSR(&mut self, val: u8) -> u8 {
+        self.P &= 0b11111110;
+        self.P |= val & 1;
+        self.flags(val >> 1)
+    }
+    fn ROL(&mut self, val: u8) -> u8 {
+        let carry = self.P & 1;
+        self.P &= 0b11111110;
+        self.P |= val >> 7;
+        self.flags(val << 1 | carry)
+    }
+    fn ROR(&mut self, val: u8) -> u8 {
+        let carry = self.P << 7;
+        self.P &= 0b11111110;
+        self.P |= val & 1;
+        self.flags(val >> 1 | carry)
+    }
+
+    // ILLEGAL
+    fn LAX(&mut self, val: u8) {
+        self.flags(val);
+        self.A = val;
+        self.X = val;
+    }
+    fn SAX(&mut self) -> u8 { self.A & self.X }
+    fn DCP(&mut self, val: u8) -> u8 {
+        let val = self.DEC(val);
+        self.CMP(val);
+        val
+    }
+    fn ISC(&mut self, val: u8) -> u8 {
+        let val = self.INC(val);
+        self.SBC(val);
+        val
+    }
+    fn SLO(&mut self, val: u8) -> u8 {
+        let val = self.ASL(val);
+        self.ORA(val);
+        val
+    }
+    fn RLA(&mut self, val: u8) -> u8 {
+        let val = self.ROL(val);
+        self.AND(val);
+        val
+    }
+    fn SRE(&mut self, val: u8) -> u8 {
+        let val = self.LSR(val);
+        self.EOR(val);
+        val
+    }
+    fn RRA(&mut self, val: u8) -> u8 {
+        let val = self.ROR(val);
+        self.ADC(val);
+        val
+    }
+}

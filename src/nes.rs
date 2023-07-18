@@ -1,168 +1,70 @@
 use std::fs::read;
 
 use crate::{
-    cart::{Cartridge, Mirroring, NROM},
-    cpu::INSTRUCTIONS,
+    cart::{Cartridge, CartridgeEnum, NROM},
+    cpu::CPU,
     input::Controllers,
-    ppu::{Color, DrawOptions, PPU},
+    ppu::{DrawOptions, Frame, PPU},
 };
 
-pub(crate) type DynCartridge = Option<Box<dyn Cartridge + Send>>;
-
-#[allow(non_snake_case)]
-pub struct NES {
+pub struct NES<C: Cartridge, P: PPU> {
     // memory
-    rom_cache: [u8; 0x8000],
     ram_internal: [u8; 0x0800],
     open: u8,
-
-    // registers
-    pub(crate) PC: u16,
-    pub(crate) SP: u8,
-    pub(crate) P: u8,
-    pub(crate) A: u8,
-    pub(crate) X: u8,
-    pub(crate) Y: u8,
-
-    // interrupts
-    pub(crate) irq_sample: bool,
-    pub(crate) nmi_sample: bool,
-    pub(crate) res_sample: bool,
-    pub(crate) hardware_interrupt: bool,
-
-    // cartridge
-    cart: DynCartridge,
-
-    // ppu
     ppu_cycle: usize,
-    ppu: Box<dyn PPU + Send>,
 
-    // controllers
-    controllers: Controllers,
+    // components
+    pub cart: C,
+    pub ppu: P,
+    pub controllers: Controllers,
+    pub cpu: CPU,
 }
 
-impl Clone for NES {
-    fn clone(&self) -> Self {
-        Self {
-            rom_cache: self.rom_cache,
-            ram_internal: self.ram_internal,
-            open: self.open,
-            PC: self.PC,
-            SP: self.SP,
-            P: self.P,
-            A: self.A,
-            X: self.X,
-            Y: self.Y,
-            irq_sample: self.irq_sample,
-            nmi_sample: self.nmi_sample,
-            res_sample: self.res_sample,
-            hardware_interrupt: self.hardware_interrupt,
-            cart: self.cart.as_ref().map(|c| (*c).clone()),
-            ppu_cycle: self.ppu_cycle,
-            ppu: self.ppu.clone(),
-            controllers: Controllers::disconnected(),
-        }
-    }
-}
-
-impl NES {
-    // PUBLIC INTERFACE
-    pub fn instruction(&mut self) {
-        // get instruction to perform
-        let op = if self.nmi_sample || self.irq_sample || self.res_sample {
-            self.hardware_interrupt = true;
-            self.read_pc();
-            0
-        } else {
-            self.read_pc()
-        };
-
-        let instr = INSTRUCTIONS[usize::from(op)];
-        instr(self);
-    }
-    pub fn next_frame(&mut self) {
-        let now = self.frame_no();
-        while self.frame_no() == now {
-            self.instruction();
-        }
-    }
-    pub fn reset(&mut self) {
-        self.res_sample = true;
-        self.ppu_cycle = 0;
-        self.SP = 0;
-        self.ppu.reset();
-    }
-    pub fn new(
-        cart: impl Cartridge + 'static + Send,
-        controllers: Controllers,
-        ppu: impl PPU + 'static + Send,
-    ) -> Self {
-        NES {
-            PC: 0,
-            SP: 0,
-            P: 0,
-            A: 0,
-            X: 0,
-            Y: 0,
-            ppu_cycle: 0,
-            ram_internal: [0; 0x0800],
-            ppu: Box::new(ppu),
-            irq_sample: false,
-            nmi_sample: false,
-            res_sample: false,
-            hardware_interrupt: false,
-            controllers,
-            open: 0,
-            rom_cache: cart.cache_prg_rom(),
-            cart: Some(Box::new(cart)),
-        }
-    }
-    pub fn cycle(&self) -> usize {
-        self.ppu_cycle / 3
-    }
-    pub fn frame(&self, options: DrawOptions) -> [Color; 61440] {
-        self.ppu.frame(&self.cart, options)
-    }
-    pub fn frame_no(&mut self) -> usize {
-        self.ppu.frame_no(self.ppu_cycle)
-    }
-    pub fn set_controllers(&mut self, c: Controllers) {
-        self.controllers = c;
-    }
-    pub fn read_ines(path: &str, controllers: Controllers, ppu: impl PPU + 'static + Send) -> Self {
+impl<P: PPU> NES<CartridgeEnum, P> {
+    pub fn read_ines(path: &str, controllers: Controllers, ppu: P) -> Self {
         let file = read(path).unwrap();
+        let cartridge = CartridgeEnum::NROM(NROM::from_ines(file));
+        Self::new(cartridge, controllers, ppu)
+    }
+}
 
-        let chr_start = 16 + 0x4000 * usize::from(file[4]);
-        let chr_end = chr_start + 0x2000;
-
-        let chr = match file[5] {
-            0 => [0; 0x2000],
-            1 => file[chr_start..chr_end].try_into().unwrap(),
-            _ => panic!(),
-        };
-
-        let mirroring = if file[6] & 1 == 0 {
-            Mirroring::Horizontal
-        } else {
-            Mirroring::Vertical
-        };
-
-        let cartridge = match file[4] {
-            1 => NROM::new_128(mirroring, chr, file[16..chr_start].try_into().unwrap()),
-            2 => NROM::new_256(mirroring, chr, file[16..chr_start].try_into().unwrap()),
-            _ => panic!(),
-        };
-
-        let mut cpu = Self::new(cartridge, controllers, ppu);
-        cpu.reset();
-        cpu
+impl<C: Cartridge, P: PPU> NES<C, P> {
+    // FIXME: get rid of ppu_cycle so this can be placed in cpu.rs
+    pub(crate) fn cycle(&mut self) { self.ppu_cycle += 3; }
+    pub(crate) fn poll_interrupts(&mut self) {
+        // TODO: irq
+        if self.ppu.nmi(self.ppu_cycle) {
+            self.cpu.nmi();
+        }
     }
 
-    // HELPER FUNCTIONS
+    pub fn read_internal(&self, addr: u16) -> u8 { self.ram_internal[usize::from(addr & 0x07FF)] }
+    pub fn write_internal(&mut self, addr: u16, data: u8) {
+        self.ram_internal[usize::from(addr & 0x07FF)] = data;
+    }
+    #[inline(always)]
+    pub fn read(&mut self, addr: u16) -> u8 {
+        self.open = match addr & 0xE000 {
+            0x0000 => self.read_internal(addr),
+            0x2000 => self.ppu.read(self.ppu_cycle, addr, &self.cart),
+            0x4000 => self.read_apu(addr),
+            0x6000 => self.cart.read_prg_ram(addr).unwrap_or(self.open),
+            _ => self.cart.read_prg_rom(addr).unwrap_or(self.open),
+        };
+        self.open
+    }
+    #[inline(always)]
+    pub fn write(&mut self, addr: u16, data: u8) {
+        match addr & 0xE000 {
+            0x0000 => self.write_internal(addr, data),
+            0x2000 => self.ppu.write(self.ppu_cycle, addr, data, &mut self.cart),
+            0x4000 => self.write_apu(addr, data),
+            0x6000 => self.cart.write_prg_ram(addr, data),
+            _ => self.cart.write_prg_rom(addr, data),
+        }
+    }
 
-    // `read_addr` and `write_addr` need to be very short apparently for the fastest runtime
-    // so we are splitting off rare code paths into seperate functions that must not be inlined
-    #[inline(never)]
+    #[cold]
     fn read_apu(&mut self, addr: u16) -> u8 {
         match addr {
             0x4016 => self.controllers.read_left(self.open),
@@ -175,9 +77,7 @@ impl NES {
         }
     }
 
-    // `read_addr` and `write_addr` need to be very short apparently for the fastest runtime
-    // so we are splitting off rare code paths into seperate functions that must not be inlined
-    #[inline(never)]
+    #[cold]
     fn write_apu(&mut self, addr: u16, data: u8) {
         match addr {
             // OAMDMA
@@ -188,21 +88,25 @@ impl NES {
                 // so the first write to OAMDMA should be ignored
 
                 // halted cycle
-                self.read_addr(self.PC);
+                self.cycle();
+                self.read(self.cpu.PC);
 
                 // align cycle
-                if self.cycle() & 1 == 0 {
-                    self.read_addr(self.PC);
+                if self.cycle_number() & 1 == 0 {
+                    self.cycle();
+                    self.read(self.cpu.PC);
                 }
 
                 // DMA
                 let high = u16::from(data) << 8;
                 for low in 0..=255 {
                     // get cycle
-                    let data = self.read_addr(high | low);
+                    self.cycle();
+                    let data = self.read(high | low);
 
                     // put cycle
-                    self.write_addr(0x2004, data);
+                    self.cycle();
+                    self.write(0x2004, data);
                 }
             }
             0x4016 => self.controllers.write(data),
@@ -212,124 +116,35 @@ impl NES {
             }
         }
     }
+}
 
-    pub fn read(&mut self, addr: u16) -> u8 {
-        self.open = match addr & 0xE000 {
-            0x0000 => self.ram_internal[usize::from(addr & 0x07FF)],
-            0x2000 => self.ppu.read(self.ppu_cycle, addr, &self.cart),
-            0x4000 => self.read_apu(addr),
-            0x6000 => self
-                .cart
-                .as_mut()
-                .map(|c| c.read_prg_ram(addr))
-                .flatten()
-                .unwrap_or(self.open),
-            _ => self
-                .cart
-                .as_ref()
-                .map(|_| self.rom_cache[usize::from(addr & 0x7FFF)])
-                .unwrap_or(self.open),
-        };
-        self.open
-    }
-    pub(crate) fn poll(&mut self) {
-        // sample irq and nmi (nmi stays on while irq gets reset every cycle)
-        // self.irq_sample = self.irq > 0;
-        self.nmi_sample = self.nmi_sample || self.ppu.nmi(self.ppu_cycle);
-    }
-    pub(crate) fn flags(&mut self, val: u8) -> u8 {
-        self.P &= 0b01111101;
-
-        // negative flag
-        self.P |= val & 0b10000000;
-
-        // zero flag
-        if val == 0 {
-            self.P |= 0b00000010;
-        }
-
-        val
-    }
-    pub(crate) fn compare(&mut self, data: u8, reg: u8) {
-        let (val, carry) = reg.overflowing_sub(data);
-        self.P &= 0b11111110;
-        if !carry {
-            self.P |= 0b00000001;
-        }
-        self.flags(val);
-    }
-
-    // READ/WRITE ACTIONS
-    pub(crate) fn write_addr(&mut self, addr: u16, data: u8) {
-        if !self.res_sample {
-            self.ppu_cycle += 3;
-            match addr & 0xE000 {
-                0x0000 => self.ram_internal[usize::from(addr & 0x07FF)] = data,
-                0x2000 => self.ppu.write(self.ppu_cycle, addr, data, &mut self.cart),
-                0x4000 => self.write_apu(addr, data),
-                0x6000 => {
-                    if let Some(cart) = self.cart.as_mut() {
-                        cart.write_prg_ram(addr, data);
-                    }
-                }
-                _ => {
-                    if let Some(cart) = self.cart.as_mut() {
-                        cart.write_prg_rom(addr, data, &mut self.rom_cache);
-                    }
-                }
-            }
-        } else {
-            self.read_addr(addr);
+impl<C: Cartridge, P: PPU> NES<C, P> {
+    // PUBLIC INTERFACE
+    pub fn next_frame(&mut self) {
+        let now = self.frame_number();
+        while self.frame_number() == now {
+            self.instruction();
         }
     }
-    pub(crate) fn read_zeropage(&mut self, addr: u8) -> u8 {
-        self.ppu_cycle += 3;
-        self.ram_internal[usize::from(addr)]
+    pub fn reset(&mut self) {
+        self.ppu_cycle = 0;
+        self.cpu.reset();
+        self.ppu.reset();
     }
-    pub(crate) fn write_zeropage(&mut self, addr: u8, data: u8) {
-        self.ppu_cycle += 3;
-        self.ram_internal[usize::from(addr)] = data;
-    }
-    pub(crate) fn read_addr(&mut self, addr: u16) -> u8 {
-        self.ppu_cycle += 3;
-        self.read(addr)
-    }
-    pub(crate) fn read_ptr_lo(&mut self, ptr: u8) -> u8 {
-        self.read_addr(u16::from(ptr))
-    }
-    pub(crate) fn read_ptr_hi(&mut self, ptr: u8) -> u8 {
-        self.read_addr(u16::from(ptr.wrapping_add(1)))
-    }
-    pub(crate) fn read_pc(&mut self) -> u8 {
-        let d = self.read_addr(self.PC);
-        if !self.hardware_interrupt {
-            self.PC += 1;
+    pub fn new(cart: C, controllers: Controllers, ppu: P) -> Self {
+        NES {
+            ppu_cycle: 0,
+            ppu,
+            controllers,
+            cart,
+            ram_internal: [0; 0x0800],
+            open: 0,
+            cpu: CPU::new(),
         }
-        d
     }
-    pub(crate) fn poke_pc(&mut self) {
-        self.read_addr(self.PC);
+    pub fn cycle_number(&self) -> usize { self.ppu_cycle / 3 }
+    pub fn draw_frame(&self, options: DrawOptions) -> Frame {
+        self.ppu.draw_frame(&self.cart, options)
     }
-    pub(crate) fn push(&mut self, data: u8) {
-        self.ppu_cycle += 3;
-        if !self.res_sample {
-            self.ram_internal[usize::from(0x0100 | u16::from(self.SP))] = data;
-        }
-        self.SP = self.SP.wrapping_sub(1);
-    }
-    pub(crate) fn push_lo(&mut self) {
-        self.push(self.PC as u8);
-    }
-    pub(crate) fn push_hi(&mut self) {
-        self.push((self.PC >> 8) as u8);
-    }
-    pub(crate) fn pop(&mut self) -> u8 {
-        let data = self.peek();
-        self.SP = self.SP.wrapping_add(1);
-        data
-    }
-    pub(crate) fn peek(&mut self) -> u8 {
-        self.ppu_cycle += 3;
-        self.ram_internal[usize::from(0x0100 | u16::from(self.SP))]
-    }
+    pub fn frame_number(&mut self) -> usize { self.ppu.frame_number(self.ppu_cycle) }
 }

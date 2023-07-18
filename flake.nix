@@ -9,6 +9,7 @@
 
       buildInputs = [
         dev.rust-nightly
+        wasm-pack
       ];
       
     };

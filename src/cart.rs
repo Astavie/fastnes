@@ -1,18 +1,111 @@
-pub trait Cartridge {
-    fn read_chr(&self, addr: u16) -> u8;
-    fn write_chr(&mut self, addr: u16, data: u8);
+use std::sync::Arc;
 
-    fn cache_prg_rom(&self) -> [u8; 0x8000];
-    fn write_prg_rom(&mut self, addr: u16, data: u8, cache: &mut [u8; 0x8000]);
+pub trait Cartridge: Clone {
+    fn read_prg_rom(&self, addr: u16) -> Option<u8>;
+    fn write_prg_rom(&mut self, addr: u16, data: u8);
 
     fn read_prg_ram(&self, addr: u16) -> Option<u8>;
     fn write_prg_ram(&mut self, addr: u16, data: u8);
 
+    fn read_chr(&self, addr: u16) -> u8;
+    fn write_chr(&mut self, addr: u16, data: u8);
+
     fn read_nametable(&self, addr: u16) -> u8;
     fn write_nametable(&mut self, addr: u16, data: u8);
 
-    fn clone(&self) -> Box<dyn Cartridge + Send>;
+    fn from_ines(file: Vec<u8>) -> Self;
 }
+
+#[derive(Clone)]
+pub struct Empty;
+
+impl Cartridge for Empty {
+    fn read_prg_rom(&self, _addr: u16) -> Option<u8> { None }
+    fn read_prg_ram(&self, _addr: u16) -> Option<u8> { None }
+    fn read_chr(&self, _addr: u16) -> u8 { 0 }
+    fn read_nametable(&self, _addr: u16) -> u8 { 0 }
+
+    fn write_prg_rom(&mut self, _addr: u16, _dataa: u8) {}
+    fn write_prg_ram(&mut self, _addr: u16, _dataa: u8) {}
+    fn write_chr(&mut self, _addr: u16, _dataa: u8) {}
+    fn write_nametable(&mut self, _addr: u16, _dataa: u8) {}
+
+    fn from_ines(_file: Vec<u8>) -> Self { panic!() }
+}
+
+macro_rules! generate_cartridge_enum {
+    (
+        $($mapper: ident),*
+    ) => {
+        #[derive(Clone)]
+        pub enum CartridgeEnum {
+            Empty,
+            $($mapper($mapper),)*
+        }
+
+        impl Cartridge for CartridgeEnum {
+            fn read_prg_rom(&self, addr: u16) -> Option<u8> {
+                match self {
+                    Self::Empty => Empty.read_prg_rom(addr),
+                    $(Self::$mapper(c) => c.read_prg_rom(addr),)*
+                }
+            }
+
+            fn write_prg_rom(&mut self, addr: u16, data: u8) {
+                match self {
+                    Self::Empty => Empty.write_prg_rom(addr, data),
+                    $(Self::$mapper(c) => c.write_prg_rom(addr, data),)*
+                }
+            }
+
+            fn read_prg_ram(&self, addr: u16) -> Option<u8> {
+                match self {
+                    Self::Empty => Empty.read_prg_ram(addr),
+                    $(Self::$mapper(c) => c.read_prg_ram(addr),)*
+                }
+            }
+
+            fn write_prg_ram(&mut self, addr: u16, data: u8) {
+                match self {
+                    Self::Empty => Empty.write_prg_ram(addr, data),
+                    $(Self::$mapper(c) => c.write_prg_ram(addr, data),)*
+                }
+            }
+
+            fn read_chr(&self, addr: u16) -> u8 {
+                match self {
+                    Self::Empty => Empty.read_chr(addr),
+                    $(Self::$mapper(c) => c.read_chr(addr),)*
+                }
+            }
+
+            fn write_chr(&mut self, addr: u16, data: u8) {
+                match self {
+                    Self::Empty => Empty.write_chr(addr, data),
+                    $(Self::$mapper(c) => c.write_chr(addr, data),)*
+                }
+            }
+
+            fn read_nametable(&self, addr: u16) -> u8 {
+                match self {
+                    Self::Empty => Empty.read_nametable(addr),
+                    $(Self::$mapper(c) => c.read_nametable(addr),)*
+                }
+            }
+
+            fn write_nametable(&mut self, addr: u16, data: u8) {
+                match self {
+                    Self::Empty => Empty.write_nametable(addr, data),
+                    $(Self::$mapper(c) => c.write_nametable(addr, data),)*
+                }
+            }
+
+            fn from_ines(_file: Vec<u8>) -> Self { todo!() }
+        }
+    };
+}
+
+generate_cartridge_enum!(NROM);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Mirroring {
@@ -23,13 +116,13 @@ pub enum Mirroring {
 }
 
 #[derive(Clone)]
-pub struct MirroredNametable {
+pub struct Nametable {
     mirroring: Mirroring,
     a: [u8; 0x0400],
     b: [u8; 0x0400],
 }
 
-impl MirroredNametable {
+impl Nametable {
     pub fn new(mirroring: Mirroring) -> Self {
         Self {
             mirroring,
@@ -73,10 +166,16 @@ impl MirroredNametable {
 
 #[derive(Clone)]
 pub struct NROM {
-    nametable: MirroredNametable,
-    chr: [u8; 0x2000],
-    ram: [u8; 0x2000], // not included on hardware but some emulator tests use it
-    rom: [u8; 0x8000],
+    // these are read-only and can be shared among cartridges of the same game
+    chr: Arc<[u8; 0x2000]>,
+    rom: Arc<[u8; 0x8000]>,
+
+    // technically the data is stored on the NES itself but we store it here for convenience
+    nametable: Nametable,
+
+    // ram is not included on hardware but some emulator tests use it
+    // to save memory when unused we store it optionally on the heap
+    ram: Option<Box<[u8; 0x2000]>>,
 }
 
 fn concat<const A: usize, const B: usize>(a: [u8; A], b: [u8; B]) -> [u8; A + B] {
@@ -89,56 +188,72 @@ fn concat<const A: usize, const B: usize>(a: [u8; A], b: [u8; B]) -> [u8; A + B]
 impl NROM {
     pub fn new_256(mirroring: Mirroring, chr: [u8; 0x2000], rom: [u8; 0x8000]) -> Self {
         Self {
-            nametable: MirroredNametable::new(mirroring),
-            ram: [0; 0x2000],
-            rom,
-            chr,
+            nametable: Nametable::new(mirroring),
+            ram: None,
+            rom: Arc::new(rom),
+            chr: Arc::new(chr),
         }
     }
     pub fn new_128(mirroring: Mirroring, chr: [u8; 0x2000], rom: [u8; 0x4000]) -> Self {
         Self {
-            nametable: MirroredNametable::new(mirroring),
-            ram: [0; 0x2000],
-            rom: concat(rom, rom),
-            chr,
+            nametable: Nametable::new(mirroring),
+            ram: None,
+            rom: Arc::new(concat(rom, rom)),
+            chr: Arc::new(chr),
         }
     }
 }
 
 impl Cartridge for NROM {
-    fn read_chr(&self, addr: u16) -> u8 {
-        self.chr[usize::from(addr)]
-    }
+    fn read_chr(&self, addr: u16) -> u8 { self.chr[usize::from(addr)] }
 
-    fn write_chr(&mut self, _addr: u16, _data: u8) {
-        // Cannot write to CHR ROM
-    }
+    fn read_nametable(&self, addr: u16) -> u8 { self.nametable.read(addr) }
 
-    fn read_nametable(&self, addr: u16) -> u8 {
-        self.nametable.read(addr)
-    }
-
-    fn write_nametable(&mut self, addr: u16, data: u8) {
-        self.nametable.write(addr, data)
-    }
-
-    fn cache_prg_rom(&self) -> [u8; 0x8000] {
-        self.rom
-    }
-
-    fn write_prg_rom(&mut self, _addr: u16, _data: u8, _cache: &mut [u8; 0x8000]) {
-        // Cannot write to PRG ROM
-    }
+    fn write_nametable(&mut self, addr: u16, data: u8) { self.nametable.write(addr, data) }
 
     fn read_prg_ram(&self, addr: u16) -> Option<u8> {
-        Some(self.ram[usize::from(addr & 0x1FFF)])
+        // return 0 if PRGRAM is uninitialized
+        Some(
+            self.ram
+                .as_ref()
+                .map_or(0, |ram| ram[usize::from(addr & 0x1FFF)]),
+        )
     }
 
     fn write_prg_ram(&mut self, addr: u16, data: u8) {
-        self.ram[usize::from(addr & 0x1FFF)] = data;
+        // if PRGRAM appears to be used,
+        // we simply create it on the fly
+        self.ram.get_or_insert_with(|| Box::new([0; 0x2000]))[usize::from(addr & 0x1FFF)] = data;
     }
 
-    fn clone(&self) -> Box<dyn Cartridge + Send> {
-        Box::new(Clone::clone(self))
+    fn read_prg_rom(&self, addr: u16) -> Option<u8> { Some(self.rom[usize::from(addr & 0x7FFF)]) }
+
+    // Cannot write to CHR ROM
+    fn write_chr(&mut self, _addr: u16, _data: u8) {}
+
+    // Cannot write to PRG ROM
+    fn write_prg_rom(&mut self, _addr: u16, _data: u8) {}
+
+    fn from_ines(file: Vec<u8>) -> Self {
+        let chr_start = 16 + 0x4000 * usize::from(file[4]);
+        let chr_end = chr_start + 0x2000;
+
+        let chr = match file[5] {
+            0 => [0; 0x2000],
+            1 => file[chr_start..chr_end].try_into().unwrap(),
+            _ => panic!(),
+        };
+
+        let mirroring = if file[6] & 1 == 0 {
+            Mirroring::Horizontal
+        } else {
+            Mirroring::Vertical
+        };
+
+        match file[4] {
+            1 => NROM::new_128(mirroring, chr, file[16..chr_start].try_into().unwrap()),
+            2 => NROM::new_256(mirroring, chr, file[16..chr_start].try_into().unwrap()),
+            _ => panic!(),
+        }
     }
 }

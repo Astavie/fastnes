@@ -4,17 +4,13 @@ use std::sync::{
 };
 
 pub struct Controllers {
-    left: Box<dyn Controller + Send>,
-    right: Box<dyn Controller + Send>,
+    pub left: Box<dyn Controller + Send>,
+    pub right: Box<dyn Controller + Send>,
 }
 
 impl Controllers {
-    pub(crate) fn read_left(&mut self, open: u8) -> u8 {
-        self.left.read(open)
-    }
-    pub(crate) fn read_right(&mut self, open: u8) -> u8 {
-        self.right.read(open)
-    }
+    pub(crate) fn read_left(&mut self, open: u8) -> u8 { self.left.read(open) }
+    pub(crate) fn read_right(&mut self, open: u8) -> u8 { self.right.read(open) }
     pub(crate) fn write(&mut self, data: u8) {
         self.left.write(data);
         self.right.write(data);
@@ -38,7 +34,7 @@ impl Controllers {
     }
 }
 
-trait Controller {
+pub trait Controller {
     fn read(&mut self, open: u8) -> u8;
     fn write(&mut self, data: u8);
 }
@@ -51,9 +47,7 @@ struct StandardController {
 struct Unconnected;
 
 impl Controller for Unconnected {
-    fn read(&mut self, open: u8) -> u8 {
-        open
-    }
+    fn read(&mut self, open: u8) -> u8 { open }
     fn write(&mut self, _data: u8) {}
 }
 
