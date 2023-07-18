@@ -458,20 +458,24 @@ impl<C: Cartridge, P: PPU> NES<C, P> {
     }
 
     // ADDRESSING
+    #[inline(always)]
     fn zpg(&mut self) -> u8 {
         // just the same as a single read cycle
         self.cycle_read_pc()
     }
+    #[inline(always)]
     fn zpg_index(&mut self, index: u8) -> u8 {
         let addr = self.cycle_read_pc();
         self.cycle();
         addr.wrapping_add(index)
     }
+    #[inline(always)]
     fn abs(&mut self) -> u16 {
         let lo = self.cycle_read_pc();
         let hi = self.cycle_read_pc();
         u16::from_le_bytes([lo, hi])
     }
+    #[inline(always)]
     fn abs_index(&mut self, write: bool, index: u8) -> u16 {
         let lo = self.cycle_read_pc().wrapping_add(index);
         let hi = self.cycle_read_pc();
@@ -488,6 +492,7 @@ impl<C: Cartridge, P: PPU> NES<C, P> {
             addr
         }
     }
+    #[inline(always)]
     fn x_indirect(&mut self) -> u16 {
         let ptr = self.cycle_read_pc();
         self.cycle();
@@ -496,6 +501,7 @@ impl<C: Cartridge, P: PPU> NES<C, P> {
         let hi = self.cycle_read_ptr_hi(ptr);
         u16::from_le_bytes([lo, hi])
     }
+    #[inline(always)]
     fn indirect_y(&mut self, write: bool) -> u16 {
         let ptr = self.cycle_read_pc();
         let lo = self.cycle_read_ptr_lo(ptr).wrapping_add(self.cpu.Y);
@@ -583,10 +589,12 @@ impl<C: Cartridge, P: PPU> NES<C, P> {
     mode_abs!(ind_y_read, ind_y_write, ind_y_rw, indirect_y(w));
 
     // READ/WRITE CYCLES
+    #[inline(always)]
     fn cycle_read(&mut self, addr: u16) -> u8 {
         self.cycle();
         self.read(addr)
     }
+    #[inline(always)]
     fn cycle_write(&mut self, addr: u16, data: u8) {
         self.cycle();
         if !self.cpu.res_sample {
@@ -595,36 +603,41 @@ impl<C: Cartridge, P: PPU> NES<C, P> {
             self.read(addr);
         }
     }
+    #[inline(always)]
     fn cycle_read_zpg(&mut self, addr: u8) -> u8 {
         self.cycle();
         self.read_internal(u16::from(addr))
     }
+    #[inline(always)]
     fn cycle_write_zpg(&mut self, addr: u8, data: u8) {
         self.cycle();
         if !self.cpu.res_sample {
             self.write_internal(u16::from(addr), data);
         }
     }
+    #[inline(always)]
     fn cycle_read_ptr_lo(&mut self, ptr: u8) -> u8 {
         self.cycle();
         self.read_internal(u16::from(ptr))
     }
+    #[inline(always)]
     fn cycle_read_ptr_hi(&mut self, ptr: u8) -> u8 {
         self.cycle();
         self.read_internal(u16::from(ptr.wrapping_add(1)))
     }
+    #[inline(always)]
     fn cycle_read_pc(&mut self) -> u8 {
         self.cycle();
         let d = self.read(self.cpu.PC);
-        if !self.cpu.hardware_interrupt {
-            self.cpu.PC += 1;
-        }
+        self.cpu.PC += u16::from(!self.cpu.hardware_interrupt);
         d
     }
+    #[inline(always)]
     fn cycle_poke_pc(&mut self) {
         self.cycle();
         self.read(self.cpu.PC);
     }
+    #[inline(always)]
     fn cycle_push(&mut self, data: u8) {
         self.cycle();
         if !self.cpu.res_sample {
@@ -633,13 +646,17 @@ impl<C: Cartridge, P: PPU> NES<C, P> {
         self.cpu.SP = self.cpu.SP.wrapping_sub(1);
     }
 
+    #[inline(always)]
     fn cycle_push_pc_lo(&mut self) { self.cycle_push(self.cpu.PC as u8); }
+    #[inline(always)]
     fn cycle_push_pc_hi(&mut self) { self.cycle_push((self.cpu.PC >> 8) as u8); }
 
+    #[inline(always)]
     fn cycle_peek(&mut self) -> u8 {
         self.cycle();
         self.read_internal(0x0100 | u16::from(self.cpu.SP))
     }
+    #[inline(always)]
     fn cycle_pop(&mut self) -> u8 {
         let data = self.cycle_peek();
         self.cpu.SP = self.cpu.SP.wrapping_add(1);

@@ -42,6 +42,7 @@ impl<C: Cartridge, P: PPU> NES<C, P> {
     pub fn write_internal(&mut self, addr: u16, data: u8) {
         self.ram_internal[usize::from(addr & 0x07FF)] = data;
     }
+    #[inline(always)]
     pub fn read(&mut self, addr: u16) -> u8 {
         self.open = match addr & 0xE000 {
             0x0000 => self.read_internal(addr),
@@ -52,6 +53,7 @@ impl<C: Cartridge, P: PPU> NES<C, P> {
         };
         self.open
     }
+    #[inline(always)]
     pub fn write(&mut self, addr: u16, data: u8) {
         match addr & 0xE000 {
             0x0000 => self.write_internal(addr, data),
@@ -62,9 +64,7 @@ impl<C: Cartridge, P: PPU> NES<C, P> {
         }
     }
 
-    // `read_addr` and `write_addr` need to be very short apparently for the fastest runtime
-    // so we are splitting off rare code paths into seperate functions that must not be inlined
-    #[inline(never)]
+    #[cold]
     fn read_apu(&mut self, addr: u16) -> u8 {
         match addr {
             0x4016 => self.controllers.read_left(self.open),
@@ -77,9 +77,7 @@ impl<C: Cartridge, P: PPU> NES<C, P> {
         }
     }
 
-    // `read_addr` and `write_addr` need to be very short apparently for the fastest runtime
-    // so we are splitting off rare code paths into seperate functions that must not be inlined
-    #[inline(never)]
+    #[cold]
     fn write_apu(&mut self, addr: u16, data: u8) {
         match addr {
             // OAMDMA
