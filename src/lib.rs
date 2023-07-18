@@ -16,11 +16,57 @@ pub mod ppu;
 mod tests {
     use test::Bencher;
 
+    use crate::cart::Cartridge;
+
     use super::*;
     use std::{
         assert_eq, format,
         fs::{read, read_to_string},
     };
+
+    #[bench]
+    fn dk1000(b: &mut Bencher) {
+        let mut dk = nes::NES::new(
+            cart::NROM::from_ines(read("rom/dk.nes").unwrap()),
+            input::Controllers::disconnected(),
+            ppu::FastPPU::new(),
+        );
+
+        // run dk for 1000 frames
+        b.iter(|| {
+            dk.reset();
+
+            const FRAME: usize = 29780;
+            const FRAMES: usize = 1000;
+            const TARGET: usize = FRAME * FRAMES + FRAMES / 2;
+
+            while dk.cycle_number() < TARGET {
+                dk.instruction();
+            }
+        })
+    }
+
+    #[bench]
+    fn smb1000(b: &mut Bencher) {
+        let mut dk = nes::NES::new(
+            cart::NROM::from_ines(read("rom/smb.nes").unwrap()),
+            input::Controllers::disconnected(),
+            ppu::FastPPU::new(),
+        );
+
+        // run dk for 1000 frames
+        b.iter(|| {
+            dk.reset();
+
+            const FRAME: usize = 29780;
+            const FRAMES: usize = 1000;
+            const TARGET: usize = FRAME * FRAMES + FRAMES / 2;
+
+            while dk.cycle_number() < TARGET {
+                dk.instruction();
+            }
+        })
+    }
 
     #[test]
     fn nestest_debug() {
