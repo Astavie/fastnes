@@ -178,13 +178,6 @@ pub struct NROM {
     ram: Option<Box<[u8; 0x2000]>>,
 }
 
-fn concat<const A: usize, const B: usize>(a: [u8; A], b: [u8; B]) -> [u8; A + B] {
-    let mut res = [0; A + B];
-    res[0..A].copy_from_slice(&a);
-    res[A..A + B].copy_from_slice(&b);
-    res
-}
-
 impl NROM {
     pub fn new_256(mirroring: Mirroring, chr: [u8; 0x2000], rom: [u8; 0x8000]) -> Self {
         Self {
@@ -198,7 +191,12 @@ impl NROM {
         Self {
             nametable: Nametable::new(mirroring),
             ram: None,
-            rom: Arc::new(concat(rom, rom)),
+            rom: Arc::new({
+                let mut res = [0; 0x8000];
+                res[0..0x4000].copy_from_slice(&rom);
+                res[0x4000..0x8000].copy_from_slice(&rom);
+                res
+            }),
             chr: Arc::new(chr),
         }
     }
