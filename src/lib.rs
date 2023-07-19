@@ -26,8 +26,10 @@ mod tests {
 
     #[bench]
     fn dk1000(b: &mut Bencher) {
+        let Ok(rom) = read("rom/dk.nes") else { return };
+
         let mut dk = nes::NES::new(
-            cart::NROM::from_ines(read("rom/dk.nes").unwrap()),
+            cart::NROM::from_ines(rom),
             input::Controllers::disconnected(),
             ppu::FastPPU::new(),
         );
@@ -48,8 +50,10 @@ mod tests {
 
     #[bench]
     fn smb1000(b: &mut Bencher) {
+        let Ok(rom) = read("rom/smb.nes") else { return };
+
         let mut dk = nes::NES::new(
-            cart::NROM::from_ines(read("rom/smb.nes").unwrap()),
+            cart::NROM::from_ines(rom),
             input::Controllers::disconnected(),
             ppu::FastPPU::new(),
         );
