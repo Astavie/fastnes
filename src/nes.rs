@@ -4,10 +4,10 @@ use crate::{
     cart::{Cartridge, CartridgeEnum, NROM},
     cpu::CPU,
     input::Controllers,
-    ppu::{DrawOptions, Frame, PPU},
+    ppu::{DrawOptions, FastPPU, Frame, PPU},
 };
 
-pub struct NES<C: Cartridge, P: PPU> {
+pub struct NES<C: Cartridge = CartridgeEnum, P: PPU = FastPPU> {
     // memory
     ram_internal: [u8; 0x0800],
     open: u8,
