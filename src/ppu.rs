@@ -684,8 +684,6 @@ impl PPU for FastPPU {
         // jesus christ, please make this better
         self.next_sprite_0.filter(|i| cycle >= *i);
         // self.next_sprite_0(cycle, cart);
-
-        println!("{:8} w {:04X} {:02X}", cycle, addr, data);
     }
 
     fn read(&mut self, cycle: usize, addr: u16, cart: &impl Cartridge) -> u8 {
@@ -740,7 +738,6 @@ impl PPU for FastPPU {
             }
             _ => todo!("read ${:04X}", addr),
         };
-        println!("{:8} r {:04X} {:02X}", cycle, addr, self.open);
         self.open
     }
 
