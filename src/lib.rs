@@ -1,7 +1,3 @@
-#![feature(test)]
-
-extern crate test;
-
 pub mod cart;
 pub mod cpu;
 pub mod input;
@@ -10,63 +6,11 @@ pub mod ppu;
 
 #[cfg(test)]
 mod tests {
-    use test::Bencher;
-
-    use crate::cart::Cartridge;
-
     use super::*;
     use std::{
         assert_eq, format,
         fs::{read, read_to_string},
     };
-
-    #[bench]
-    fn dk1000(b: &mut Bencher) {
-        let Ok(rom) = read("rom/dk.nes") else { return };
-
-        let mut dk = nes::NES::new(
-            cart::NROM::from_ines(rom),
-            input::Controllers::disconnected(),
-            ppu::FastPPU::new(),
-        );
-
-        // run dk for 1000 frames
-        b.iter(|| {
-            dk.reset();
-
-            const FRAME: usize = 29780;
-            const FRAMES: usize = 1000;
-            const TARGET: usize = FRAME * FRAMES + FRAMES / 2;
-
-            while dk.cycle_number() < TARGET {
-                dk.instruction();
-            }
-        })
-    }
-
-    #[bench]
-    fn smb1000(b: &mut Bencher) {
-        let Ok(rom) = read("rom/smb.nes") else { return };
-
-        let mut dk = nes::NES::new(
-            cart::NROM::from_ines(rom),
-            input::Controllers::disconnected(),
-            ppu::FastPPU::new(),
-        );
-
-        // run dk for 1000 frames
-        b.iter(|| {
-            dk.reset();
-
-            const FRAME: usize = 29780;
-            const FRAMES: usize = 1000;
-            const TARGET: usize = FRAME * FRAMES + FRAMES / 2;
-
-            while dk.cycle_number() < TARGET {
-                dk.instruction();
-            }
-        })
-    }
 
     #[test]
     fn nestest_debug() {
@@ -108,124 +52,6 @@ mod tests {
 
         assert_eq!(nes.cycle_number(), END_CYCLE);
         assert_eq!(nes.cpu.PC, END_ADDR);
-    }
-
-    #[bench]
-    fn nestest_dummy(b: &mut Bencher) {
-        let mut file = read("test/nestest/nestest.nes").unwrap();
-        let bytes = &mut file[16..16400];
-        bytes[0xFFFC & 0x3FFF] = 0x00;
-        bytes[0xFFFD & 0x3FFF] = 0xC0;
-
-        let cartridge = cart::NROM::new_128(
-            cart::Mirroring::Horizontal,
-            [0; 0x2000],
-            bytes.try_into().unwrap(),
-        );
-        let mut nes = nes::NES::new(cartridge, input::Controllers::disconnected(), ppu::DummyPPU);
-
-        b.iter(|| {
-            nes.reset();
-
-            const END_CYCLE: usize = 26548;
-            const END_ADDR: u16 = 0xC6A2;
-
-            while nes.cycle_number() < END_CYCLE {
-                nes.instruction();
-            }
-
-            assert_eq!(nes.cycle_number(), END_CYCLE);
-            assert_eq!(nes.cpu.PC, END_ADDR);
-        });
-    }
-
-    #[bench]
-    fn nestest_dummy_enum(b: &mut Bencher) {
-        let mut file = read("test/nestest/nestest.nes").unwrap();
-        let bytes = &mut file[16..16400];
-        bytes[0xFFFC & 0x3FFF] = 0x00;
-        bytes[0xFFFD & 0x3FFF] = 0xC0;
-
-        let cartridge = cart::CartridgeEnum::NROM(cart::NROM::new_128(
-            cart::Mirroring::Horizontal,
-            [0; 0x2000],
-            bytes.try_into().unwrap(),
-        ));
-        let mut nes = nes::NES::new(cartridge, input::Controllers::disconnected(), ppu::DummyPPU);
-
-        b.iter(|| {
-            nes.reset();
-
-            const END_CYCLE: usize = 26548;
-            const END_ADDR: u16 = 0xC6A2;
-
-            while nes.cycle_number() < END_CYCLE {
-                nes.instruction();
-            }
-
-            assert_eq!(nes.cycle_number(), END_CYCLE);
-            assert_eq!(nes.cpu.PC, END_ADDR);
-        });
-    }
-
-    #[bench]
-    fn nestest_fast(b: &mut Bencher) {
-        let mut file = read("test/nestest/nestest.nes").unwrap();
-        let bytes = &mut file[16..16400];
-        bytes[0xFFFC & 0x3FFF] = 0x00;
-        bytes[0xFFFD & 0x3FFF] = 0xC0;
-
-        let cartridge = cart::NROM::new_128(
-            cart::Mirroring::Horizontal,
-            [0; 0x2000],
-            bytes.try_into().unwrap(),
-        );
-        let mut nes =
-            nes::NES::new(cartridge, input::Controllers::disconnected(), ppu::FastPPU::new());
-
-        b.iter(|| {
-            nes.reset();
-
-            const END_CYCLE: usize = 26548;
-            const END_ADDR: u16 = 0xC6A2;
-
-            while nes.cycle_number() < END_CYCLE {
-                nes.instruction();
-            }
-
-            assert_eq!(nes.cycle_number(), END_CYCLE);
-            assert_eq!(nes.cpu.PC, END_ADDR);
-        });
-    }
-
-    #[bench]
-    fn nestest_fast_enum(b: &mut Bencher) {
-        let mut file = read("test/nestest/nestest.nes").unwrap();
-        let bytes = &mut file[16..16400];
-        bytes[0xFFFC & 0x3FFF] = 0x00;
-        bytes[0xFFFD & 0x3FFF] = 0xC0;
-
-        let cartridge = cart::CartridgeEnum::NROM(cart::NROM::new_128(
-            cart::Mirroring::Horizontal,
-            [0; 0x2000],
-            bytes.try_into().unwrap(),
-        ));
-        let mut nes =
-            nes::NES::new(cartridge, input::Controllers::disconnected(), ppu::FastPPU::new());
-
-        b.iter(|| {
-            nes.reset();
-
-            const END_CYCLE: usize = 26548;
-            const END_ADDR: u16 = 0xC6A2;
-
-            while nes.cycle_number() < END_CYCLE {
-                nes.instruction();
-            }
-
-            assert_eq!(nes.cycle_number(), END_CYCLE);
-            assert_eq!(nes.cpu.PC, END_ADDR);
-        });
     }
 
     fn test_file(file: &str) {
