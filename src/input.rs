@@ -34,6 +34,21 @@ impl Controllers {
             polled: false,
         }
     }
+    pub fn standard_2p(left: &Arc<AtomicU8>, right: &Arc<AtomicU8>) -> Controllers {
+        let left = StandardController {
+            input: Arc::clone(left),
+            shift: None,
+        };
+        let right = StandardController {
+            input: Arc::clone(right),
+            shift: None,
+        };
+        Controllers {
+            left: Box::new(left),
+            right: Box::new(right),
+            polled: false,
+        }
+    }
     pub fn disconnected() -> Controllers {
         Controllers {
             left: Box::new(Unconnected),
@@ -68,7 +83,11 @@ impl Controller for Unconnected {
 impl Controller for StandardController {
     fn read(&mut self, open: u8) -> u8 {
         let shift = self.shift.unwrap_or(0);
-        let data = (self.input.load(Ordering::Relaxed) >> shift) & 1;
+        let data = if shift >= 8 {
+            1
+        } else {
+            (self.input.load(Ordering::Relaxed) >> shift) & 1
+        };
         self.shift = self.shift.map(|s| s + 1);
         (open & 0b11111110) | data
     }

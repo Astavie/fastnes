@@ -10,6 +10,7 @@ mod tests {
     use std::{
         assert_eq, format,
         fs::{read, read_to_string},
+        sync::{atomic::AtomicU8, Arc},
     };
 
     #[test]
@@ -52,6 +53,55 @@ mod tests {
 
         assert_eq!(nes.cycle_number(), END_CYCLE);
         assert_eq!(nes.cpu.PC, END_ADDR);
+    }
+
+    #[test]
+    fn accuracy_coin() {
+        let left = Arc::new(AtomicU8::new(0b00001000)); // pressing Start
+        let right = Arc::new(AtomicU8::new(0));
+        let mut nes = nes::NES::read_ines(
+            "test/AccuracyCoin.nes",
+            input::Controllers::standard_2p(&left, &right),
+            ppu::FastPPU::new(),
+        );
+
+        let addr_running: u16 = 0x35;
+
+        // Perform tests
+        while nes.read_internal(addr_running) != 1 {
+            nes.instruction();
+        }
+        while nes.read_internal(addr_running) != 0 {
+            nes.instruction();
+        }
+
+        // Check results
+        let addr_suites_start: u16 = 0x8200;
+        let addr_suites_end: u16 = nes.read_cart_rom_word(addr_suites_start);
+
+        for addr_suite_entry in (addr_suites_start..addr_suites_end).step_by(2) {
+            let addr_suite = nes.read_cart_rom_word(addr_suite_entry);
+
+            // suites are made up of:
+            // name bytes, $FF, list of tests, $FF
+            let (suite_name, mut addr_test) = nes.read_cart_rom_string(addr_suite, 0xFF);
+            println!("{}", suite_name);
+
+            while nes.read_cart_rom(addr_test) != 0xFF {
+                // suite tests are made up of:
+                // name bytes, $FF, result address, rom address
+
+                let (test_name, addr_addr_result) = nes.read_cart_rom_string(addr_test, 0xFF);
+                let addr_result = nes.read_cart_rom_word(addr_addr_result);
+                let result = nes.read_internal(addr_result) >> 2;
+
+                print!("  {} ... ", test_name);
+                assert_eq!(result, 0);
+                println!("ok");
+
+                addr_test = addr_addr_result.wrapping_add(4);
+            }
+        }
     }
 
     fn test_file(file: &str) {

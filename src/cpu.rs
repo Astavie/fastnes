@@ -1,8 +1,13 @@
+use enumset::__internal::EnumSetTypeRepr;
+
 use crate::{cart::Cartridge, nes::NES, ppu::PPU};
 
 #[allow(non_snake_case)]
 #[derive(Clone)]
 pub struct CPU {
+    // buses
+    pub addr: u16,
+
     // registers
     pub PC: u16,
     pub SP: u8,
@@ -30,56 +35,58 @@ macro_rules! mode_abs {
 
 macro_rules! mode_zpg {
     ($name_r: ident, $name_w: ident, $name_rw: ident, $addr: ident (w $(, $index: ident)?)) => {
-        mode_full!($name_r, $name_w, $name_rw, $addr(w $(, $index)?), cycle_read_zpg, cycle_write_zpg);
+        mode_full!($name_r, $name_w, $name_rw, $addr(w $(, $index)?), cycle_read, cycle_write);
     };
     ($name_r: ident, $name_w: ident, $name_rw: ident, $addr: ident ($($index: ident)?)) => {
-        mode_full!($name_r, $name_w, $name_rw, $addr($($index)?), cycle_read_zpg, cycle_write_zpg);
+        mode_full!($name_r, $name_w, $name_rw, $addr($($index)?), cycle_read, cycle_write);
     };
 }
 
 macro_rules! mode_full {
     ($name_r: ident, $name_w: ident, $name_rw: ident, $addr: ident (w $(, $index: ident)?), $read: ident, $write: ident) => {
         fn $name_r(&mut self, f: fn(&mut CPU, u8)) {
-            let addr = self.$addr(false $(, self.cpu.$index)?);
+            self.cpu.addr = u16::from(self.$addr(false $(, self.cpu.$index)?));
             self.poll_interrupts();
-            let data = self.$read(addr);
+            let data = self.$read();
             f(&mut self.cpu, data);
         }
         fn $name_w(&mut self, f: fn(&mut CPU) -> u8) {
-            let addr = self.$addr(true $(, self.cpu.$index)?);
+            let addr = u16::from(self.$addr(true $(, self.cpu.$index)?));
             self.poll_interrupts();
             let data = f(&mut self.cpu);
-            self.$write(addr, data);
+            self.cpu.addr = addr;
+            self.$write(data);
         }
         fn $name_rw(&mut self, f: fn(&mut CPU, u8) -> u8) {
-            let addr = self.$addr(true $(, self.cpu.$index)?);
-            let data = self.$read(addr);
-            self.$write(addr, data);
+            self.cpu.addr = u16::from(self.$addr(true $(, self.cpu.$index)?));
+            let data = self.$read();
+            self.$write(data);
             self.poll_interrupts();
             let data = f(&mut self.cpu, data);
-            self.$write(addr, data);
+            self.$write(data);
         }
     };
     ($name_r: ident, $name_w: ident, $name_rw: ident, $addr: ident ($($index: ident)?), $read: ident, $write: ident) => {
         fn $name_r(&mut self, f: fn(&mut CPU, u8)) {
-            let addr = self.$addr($(self.cpu.$index)?);
+            self.cpu.addr = u16::from(self.$addr($(self.cpu.$index)?));
             self.poll_interrupts();
-            let data = self.$read(addr);
+            let data = self.$read();
             f(&mut self.cpu, data);
         }
         fn $name_w(&mut self, f: fn(&mut CPU) -> u8) {
-            let addr = self.$addr($(self.cpu.$index)?);
+            let addr = u16::from(self.$addr($(self.cpu.$index)?));
             self.poll_interrupts();
             let data = f(&mut self.cpu);
-            self.$write(addr, data);
+            self.cpu.addr = addr;
+            self.$write(data);
         }
         fn $name_rw(&mut self, f: fn(&mut CPU, u8) -> u8) {
-            let addr = self.$addr($(self.cpu.$index)?);
-            let data = self.$read(addr);
-            self.$write(addr, data);
+            self.cpu.addr = u16::from(self.$addr($(self.cpu.$index)?));
+            let data = self.$read();
+            self.$write(data);
             self.poll_interrupts();
             let data = f(&mut self.cpu, data);
-            self.$write(addr, data);
+            self.$write(data);
         }
     };
 }
@@ -126,8 +133,11 @@ impl<C: Cartridge, P: PPU> NES<C, P> {
                 // interrupt disable
                 self.cpu.P |= 0b00000100;
 
-                let lo = self.cycle_read(addr);
-                let hi = self.cycle_read(addr | 1);
+                self.cpu.addr = addr;
+                let lo = self.cycle_read();
+                self.cpu.addr |= 1;
+                let hi = self.cycle_read();
+
                 let addr = u16::from_le_bytes([lo, hi]);
                 self.cpu.PC = addr;
                 self.cpu.hardware_interrupt = false;
@@ -152,11 +162,13 @@ impl<C: Cartridge, P: PPU> NES<C, P> {
                 let addr_lo = u16::from_le_bytes([lo, hi]);
                 let addr_hi = u16::from_le_bytes([lo.wrapping_add(1), hi]);
 
-                let lo = self.cycle_read(addr_lo);
+                self.cpu.addr = addr_lo;
+                let lo = self.cycle_read();
 
                 self.poll_interrupts();
 
-                let hi = self.cycle_read(addr_hi);
+                self.cpu.addr = addr_hi;
+                let hi = self.cycle_read();
                 let addr = u16::from_le_bytes([lo, hi]);
                 self.cpu.PC = addr;
             }
@@ -453,6 +465,23 @@ impl<C: Cartridge, P: PPU> NES<C, P> {
             0x63 => self.x_ind_rw(CPU::RRA),
             0x73 => self.ind_y_rw(CPU::RRA),
 
+            0x0B | 0x2B => self.imm(CPU::ANC),
+            0x4B => self.imm(CPU::ALR),
+            0x6B => self.imm(CPU::ARR),
+            0xBB => self.abs_y_read(CPU::LAS),
+            0xCB => self.imm(CPU::SBX),
+
+            // UNSTABLE ILLEGAL
+            0x9F => self.abs_y_write_unstable(CPU::SHA),
+            0x93 => self.ind_y_write_unstable(CPU::SHA),
+            0x9E => self.abs_y_write_unstable(CPU::SHX),
+            0x9C => self.abs_x_write_unstable(CPU::SHY),
+            0x9B => self.abs_y_write_unstable(CPU::TAS),
+
+            // HIGHLY UNSTABLE ILLEGAL
+            0x8B => self.imm(CPU::ANE),
+            0xAB => self.imm(CPU::LXA),
+
             _ => todo!("instr 0x{:02X}", op),
         }
     }
@@ -483,11 +512,13 @@ impl<C: Cartridge, P: PPU> NES<C, P> {
 
         // Fix high byte
         if lo < index {
-            self.cycle_read(addr);
+            self.cpu.addr = addr;
+            self.cycle_read();
             addr.wrapping_add(0x0100)
         } else {
             if write {
-                self.cycle_read(addr);
+                self.cpu.addr = addr;
+                self.cycle_read();
             }
             addr
         }
@@ -510,11 +541,13 @@ impl<C: Cartridge, P: PPU> NES<C, P> {
 
         // Fix high byte
         if lo < self.cpu.Y {
-            self.cycle_read(addr);
+            self.cpu.addr = addr;
+            self.cycle_read();
             addr.wrapping_add(0x0100)
         } else {
             if write {
-                self.cycle_read(addr);
+                self.cpu.addr = addr;
+                self.cycle_read();
             }
             addr
         }
@@ -588,48 +621,87 @@ impl<C: Cartridge, P: PPU> NES<C, P> {
     mode_abs!(x_ind_read, x_ind_write, x_ind_rw, x_indirect());
     mode_abs!(ind_y_read, ind_y_write, ind_y_rw, indirect_y(w));
 
-    // READ/WRITE CYCLES
-    #[inline(always)]
-    fn cycle_read(&mut self, addr: u16) -> u8 {
-        self.cycle();
-        self.read(addr)
-    }
-    #[inline(always)]
-    fn cycle_write(&mut self, addr: u16, data: u8) {
-        self.cycle();
-        if !self.cpu.res_sample {
-            self.write(addr, data);
+    #[cold]
+    fn abs_y_write_unstable(&mut self, f: fn(&mut CPU) -> u8) {
+        let addr = self.abs_index(true, self.cpu.Y);
+        let page_cross = addr != self.cpu.addr;
+        self.poll_interrupts();
+
+        let [lo, hi] = self.cpu.addr.to_le_bytes();
+        let data = f(&mut self.cpu) & hi.wrapping_add(1);
+        if page_cross {
+            self.cpu.addr = u16::from_le_bytes([lo, data]);
+            self.cycle_write(data);
         } else {
-            self.read(addr);
+            self.cycle_write(data);
         }
     }
+
+    #[cold]
+    fn abs_x_write_unstable(&mut self, f: fn(&mut CPU) -> u8) {
+        let addr = self.abs_index(true, self.cpu.X);
+        let page_cross = addr != self.cpu.addr;
+        self.poll_interrupts();
+
+        let [lo, hi] = self.cpu.addr.to_le_bytes();
+        let data = f(&mut self.cpu) & hi.wrapping_add(1);
+        if page_cross {
+            self.cpu.addr = u16::from_le_bytes([lo, data]);
+            self.cycle_write(data);
+        } else {
+            self.cycle_write(data);
+        }
+    }
+
+    #[cold]
+    fn ind_y_write_unstable(&mut self, f: fn(&mut CPU) -> u8) {
+        let addr = self.indirect_y(true);
+        let page_cross = addr != self.cpu.addr;
+        self.poll_interrupts();
+
+        let [lo, hi] = self.cpu.addr.to_le_bytes();
+        let data = f(&mut self.cpu) & hi.wrapping_add(1);
+        if page_cross {
+            self.cpu.addr = u16::from_le_bytes([lo, data]);
+            self.cycle_write(data);
+        } else {
+            self.cycle_write(data);
+        }
+    }
+
+    // READ/WRITE CYCLES
     #[inline(always)]
-    fn cycle_read_zpg(&mut self, addr: u8) -> u8 {
+    fn cycle_read(&mut self) -> u8 {
         self.cycle();
-        self.read_internal(u16::from(addr))
+        self.read(self.cpu.addr)
     }
     #[inline(always)]
-    fn cycle_write_zpg(&mut self, addr: u8, data: u8) {
+    fn cycle_write(&mut self, data: u8) {
         self.cycle();
         if !self.cpu.res_sample {
-            self.write_internal(u16::from(addr), data);
+            self.write(self.cpu.addr, data);
+        } else {
+            self.read(self.cpu.addr);
         }
     }
     #[inline(always)]
     fn cycle_read_ptr_lo(&mut self, ptr: u8) -> u8 {
-        self.cycle();
-        self.read_internal(u16::from(ptr))
+        self.cpu.addr = u16::from(ptr);
+        self.cycle_read()
     }
     #[inline(always)]
     fn cycle_read_ptr_hi(&mut self, ptr: u8) -> u8 {
-        self.cycle();
-        self.read_internal(u16::from(ptr.wrapping_add(1)))
+        self.cpu.addr = u16::from(ptr.wrapping_add(1));
+        self.cycle_read()
     }
     #[inline(always)]
     fn cycle_read_pc(&mut self) -> u8 {
-        self.cycle();
-        let d = self.read(self.cpu.PC);
-        self.cpu.PC += u16::from(!self.cpu.hardware_interrupt);
+        self.cpu.addr = self.cpu.PC;
+        let d = self.cycle_read();
+        self.cpu.PC = self
+            .cpu
+            .PC
+            .wrapping_add(u16::from(!self.cpu.hardware_interrupt));
         d
     }
     #[inline(always)]
@@ -667,6 +739,7 @@ impl<C: Cartridge, P: PPU> NES<C, P> {
 impl CPU {
     pub fn new() -> Self {
         CPU {
+            addr: 0,
             PC: 0,
             SP: 0,
             P: 0,
@@ -842,5 +915,60 @@ impl CPU {
         let val = self.ROR(val);
         self.ADC(val);
         val
+    }
+    fn ANC(&mut self, val: u8) {
+        let val = self.A & val;
+        self.A = self.flags(val);
+
+        // carry flag
+        self.P &= 0b11111110;
+        self.P |= val >> 7;
+    }
+    fn ALR(&mut self, val: u8) {
+        self.AND(val);
+        self.A = self.LSR(self.A);
+    }
+    fn ARR(&mut self, val: u8) {
+        self.A = self.ROR(self.A & val);
+
+        self.P &= 0b10111110;
+        if self.A.has_bit(6) {
+            self.P |= 0b00000001;
+        }
+        if self.A.has_bit(5) != self.A.has_bit(6) {
+            self.P |= 0b01000000;
+        }
+    }
+    fn LAS(&mut self, val: u8) {
+        self.A = self.flags(val & self.SP);
+        self.X = self.A;
+        self.SP = self.A;
+    }
+    fn SBX(&mut self, val: u8) {
+        self.compare(val, self.A & self.X);
+        self.X = (self.A & self.X).wrapping_sub(val);
+    }
+
+    // UNSTABLE ILLEGAL
+    fn SHA(&mut self) -> u8 { self.A & self.X }
+    fn SHX(&mut self) -> u8 { self.X }
+    fn SHY(&mut self) -> u8 { self.Y }
+    fn TAS(&mut self) -> u8 {
+        self.SP = self.A & self.X;
+        self.A & self.X
+    }
+
+    // HIGHLY UNSTABLE ILLEGAL
+    // A base value in A is determined based on the contents of A and a constant, which may be typically $00, $ff, $ee, etc.
+    // The value of this constant depends on temerature, the chip series, and maybe other factors, as well.
+    fn ANE(&mut self, val: u8) {
+        const BASE: u8 = 0;
+        self.A = self.flags((self.A | BASE) & self.X & val);
+    }
+    fn LXA(&mut self, val: u8) {
+        const BASE: u8 = 0;
+        let val = self.flags((self.A | BASE) & val);
+        self.A = val;
+        self.X = val;
     }
 }

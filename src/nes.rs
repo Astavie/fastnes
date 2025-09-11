@@ -1,4 +1,4 @@
-use std::fs::read;
+use std::{fs::read, slice, str};
 
 use crate::{
     cart::{Cartridge, CartridgeEnum, NROM},
@@ -56,6 +56,35 @@ impl<C: Cartridge, P: PPU> NES<C, P> {
     pub fn write_internal(&mut self, addr: u16, data: u8) {
         self.ram_internal[usize::from(addr & 0x07FF)] = data;
     }
+
+    pub fn read_cart_rom(&self, addr: u16) -> u8 {
+        self.cart.read_prg_rom(addr).unwrap_or(self.open)
+    }
+
+    pub fn read_cart_rom_word(&self, addr: u16) -> u16 {
+        let addr_lo = addr;
+        let addr_hi = addr.wrapping_add(1);
+
+        let lo = self.read_cart_rom(addr_lo);
+        let hi = self.read_cart_rom(addr_hi);
+        ((hi as u16) << 8) | lo as u16
+    }
+
+    pub fn read_cart_rom_string(&self, mut addr: u16, end_byte: u8) -> (String, u16) {
+        let mut result = String::new();
+        loop {
+            let byte = self.read_cart_rom(addr);
+            addr = addr.wrapping_add(1);
+
+            if byte == end_byte {
+                return (result, addr);
+            } else {
+                let next = String::from_utf8_lossy(slice::from_ref(&byte));
+                result.push_str(&next);
+            }
+        }
+    }
+
     #[inline(always)]
     pub fn read(&mut self, addr: u16) -> u8 {
         self.open = match addr & 0xE000 {
@@ -69,6 +98,7 @@ impl<C: Cartridge, P: PPU> NES<C, P> {
     }
     #[inline(always)]
     pub fn write(&mut self, addr: u16, data: u8) {
+        self.open = data;
         match addr & 0xE000 {
             0x0000 => self.write_internal(addr, data),
             0x2000 => self.ppu.write(self.ppu_cycle, addr, data, &mut self.cart),

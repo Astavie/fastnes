@@ -645,21 +645,15 @@ impl PPU for FastPPU {
             // PPUDATA
             7 => {
                 let addr = self.v & 0x3FFF;
-                if addr >= 0x3F00 && addr < 0x3F20 {
+                if addr >= 0x3F00 {
                     // palette ram
-                    self.palette_ram[usize::from(addr as u8)] = data;
-
-                    // FIXME: hacky way to implement mirrors
-                    if addr as u8 >= 0x10 {
-                        self.palette_ram[0x00] = self.palette_ram[0x10];
-                        self.palette_ram[0x04] = self.palette_ram[0x14];
-                        self.palette_ram[0x08] = self.palette_ram[0x18];
-                        self.palette_ram[0x0C] = self.palette_ram[0x1C];
+                    let addr = (addr & 0b11111) as u8;
+                    if addr & 0b00011 == 0 {
+                        let addr = addr & 0b01111;
+                        self.palette_ram[usize::from(addr | 0b00000)] = data;
+                        self.palette_ram[usize::from(addr | 0b10000)] = data;
                     } else {
-                        self.palette_ram[0x10] = self.palette_ram[0x00];
-                        self.palette_ram[0x14] = self.palette_ram[0x04];
-                        self.palette_ram[0x18] = self.palette_ram[0x08];
-                        self.palette_ram[0x1C] = self.palette_ram[0x0C];
+                        self.palette_ram[usize::from(addr)] = data;
                     }
                 } else {
                     match addr & 0x2000 {
@@ -688,6 +682,8 @@ impl PPU for FastPPU {
 
     fn read(&mut self, cycle: usize, addr: u16, cart: &impl Cartridge) -> u8 {
         match addr & 7 {
+            // write-only registers
+            0 | 1 | 3 | 5 | 6 => {}
             // PPUSTATUS
             2 => {
                 self.w = 0;
@@ -710,14 +706,20 @@ impl PPU for FastPPU {
                     self.next_nmi = None;
                 }
             }
+            // OAMDATA
+            4 => {
+                // TODO: Reading OAMDATA while the PPU is rendering will expose internal OAM accesses during sprite evaluation and loading
+                self.open = self.OAM[usize::from(self.OAMADDR)];
+            }
             // PPUDATA
             7 => {
                 let addr = self.v & 0x3FFF;
 
                 // palette data is paced immediately on the data bus
-                self.open = if addr >= 0x3F00 && addr < 0x3F20 {
+                self.open = if addr >= 0x3F00 {
                     // palette ram
-                    self.palette_ram[usize::from(addr as u8)]
+                    (self.open & 0b11000000)
+                        | (self.palette_ram[usize::from(addr & 0b11111)] & 0b00111111)
                 } else {
                     self.PPUDATA
                 };
