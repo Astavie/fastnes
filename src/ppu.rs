@@ -183,6 +183,10 @@ pub struct FastPPU {
     vbl_started: Option<usize>,
     last_cycle: usize,
 
+    last_scroll_x: u8,
+    last_scroll_y: u8,
+    last_nametable: Nametable,
+
     frame: usize,
 
     // registers
@@ -220,6 +224,10 @@ impl FastPPU {
             vbl_started: None,
             next_sprite_0: None,
             last_cycle: 0,
+
+            last_scroll_x: 0,
+            last_scroll_y: 0,
+            last_nametable: Nametable::TopLeft,
 
             // registers
             PPUMASK: EnumSet::new(),
@@ -378,6 +386,9 @@ impl FastPPU {
 
                     // sprite 0 hit!
                     self.next_sprite_0 = Some(dot_cycle);
+                    self.last_scroll_x = self.scroll_x;
+                    self.last_scroll_y = self.scroll_y;
+                    self.last_nametable = self.nametable;
                     return;
                 }
             }
@@ -468,8 +479,6 @@ impl FastPPU {
     }
 
     fn draw_tiles(&self, cart: &impl Cartridge, frame: &mut [Color]) {
-        let nametable = self.nametable.addr();
-
         let x_start = if self.PPUMASK.contains(PPUMASK::ShowBackgroundLeft) {
             0
         } else {
@@ -478,9 +487,15 @@ impl FastPPU {
 
         // background
         for screen_y in 0..240 {
+            let (scroll_x, scroll_y, nametable) = if u16::from(self.OAM[0]) + 8 > screen_y {
+                (self.last_scroll_x, self.last_scroll_y, self.last_nametable.addr())
+            } else {
+                (self.scroll_x, self.scroll_y, self.nametable.addr())
+            };
+
             for screen_x in x_start..256 {
-                let mut x = screen_x + u16::from(self.scroll_x);
-                let mut y = screen_y + u16::from(self.scroll_y);
+                let mut x = screen_x + u16::from(scroll_x);
+                let mut y = screen_y + u16::from(scroll_y);
                 let mut nametable = nametable;
 
                 if x >= 256 {
